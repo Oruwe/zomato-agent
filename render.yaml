@@ -30,8 +30,11 @@ services:
         value: "1000"
       - key: DAILY_CAP_INR
         value: "1500"
+      # NPCI's UPI Circle caps full delegation to a secondary user -- the slot an agent
+      # occupies -- at Rs 15,000/month. Above that the refusal just moves from a clear
+      # message to a rail decline. Kept in step with agent.yml by tests/test_manifest.py.
       - key: MONTHLY_CAP_INR
-        value: "20000"
+        value: "15000"
       - key: HUMAN_APPROVAL_ABOVE_INR
         value: "800"
       - key: GEMINI_MODEL
