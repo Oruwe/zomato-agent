@@ -29,8 +29,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from app.observability.journal import append_jsonl, ensure_dir
 from app.observability.latency import REGISTRY, now_ns
+from app.observability.logger import get_logger
 from app.payments.base import Money
+
+log = get_logger(__name__)
 
 __all__ = ["Wallet", "Hold", "WalletDenied", "WalletCaps", "DenyReason"]
 
@@ -83,7 +87,7 @@ class Wallet:
     """Thread-safe, cap-enforcing spend ledger with an append-only journal."""
 
     __slots__ = ("_caps", "_lock", "_holds", "_day", "_day_spent", "_month", "_month_spent",
-                 "_reserved", "_journal_path", "_committed_count")
+                 "_reserved", "_journal_path", "_committed_count", "_journal_failures")
 
     def __init__(self, caps: WalletCaps, journal_path: str | os.PathLike[str] | None = None) -> None:
         self._caps = caps
@@ -96,9 +100,10 @@ class Wallet:
         self._month_spent = 0
         self._reserved = 0
         self._committed_count = 0
+        self._journal_failures = 0
         self._journal_path = Path(journal_path) if journal_path else None
         if self._journal_path:
-            self._journal_path.parent.mkdir(parents=True, exist_ok=True)
+            ensure_dir(self._journal_path.parent)
             self._replay()
 
     # -- rollover ---------------------------------------------------------------
@@ -202,17 +207,29 @@ class Wallet:
                     0, caps.monthly_paise - self._month_spent - self._reserved
                 ),
                 "committed_orders": self._committed_count,
+                "journal_failures": self._journal_failures,
             }
 
     # -- durability -------------------------------------------------------------
     def _append_journal(self, record: dict[str, object]) -> None:
+        """Record a commit durably.
+
+        A failure here is never raised: the order has already been placed, and turning a
+        lost audit line into a failed request leaves the caller with a wrong view of a
+        real order. It is counted instead, and reported by `snapshot()` and /readyz,
+        because an unjournalled commit will not be replayed after a restart -- meaning
+        today's cap would reset and permit spending that has already happened.
+        """
         if not self._journal_path:
             return
-        line = json.dumps(record, separators=(",", ":")) + "\n"
-        with open(self._journal_path, "a", encoding="utf-8") as fh:
-            fh.write(line)
-            fh.flush()
-            os.fsync(fh.fileno())
+        if not append_jsonl(self._journal_path, record, fsync=True):
+            with self._lock:
+                self._journal_failures += 1
+            log.error(
+                "wallet commit was not journalled; the daily cap will not survive a "
+                "restart until this is resolved",
+                extra={"path": str(self._journal_path), "amount_paise": record.get("amount_paise")},
+            )
 
     def _replay(self) -> None:
         """Rebuild today's/this month's counters from the journal after a restart."""

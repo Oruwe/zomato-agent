@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from app.observability.journal import append_jsonl, ensure_dir
 from app.observability.latency import REGISTRY, now_ns
 
 __all__ = ["UserMemory", "MemoryEvent", "EventKind", "PreferenceProfile"]
@@ -112,7 +113,7 @@ class UserMemory:
     def __init__(self, user_id: str, base_path: str | os.PathLike[str], max_events: int = 5000):
         self.user_id = user_id
         self._path = Path(base_path) / f"{_safe(user_id)}.jsonl"
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_dir(self._path.parent)
         self._lock = threading.Lock()
         self._max_events = max_events
         self._events: list[MemoryEvent] = []
@@ -301,9 +302,8 @@ class UserMemory:
                 self._cuisines[like] += weight
 
     def _append_journal(self, event: MemoryEvent) -> None:
-        line = json.dumps(asdict(event), separators=(",", ":"), default=str) + "\n"
-        with open(self._path, "a", encoding="utf-8") as fh:
-            fh.write(line)
+        # Recorded after the order already happened; a failure must not fail the request.
+        append_jsonl(self._path, asdict(event))
 
     def _load(self) -> None:
         if not self._path.exists():

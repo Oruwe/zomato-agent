@@ -171,6 +171,17 @@ def test_xss_audit_catches_a_regression() -> None:
     assert _DATA_READ_RE.search(_strip_balanced(holes[0]))
 
 
+def test_policy_codes_are_translated_for_humans() -> None:
+    """Escalation reasons are machine codes; the UI must not show them raw."""
+    js = Path("app/ui/app.js").read_text()
+    assert "function describeEscalation(" in js
+    # The two the user sees most often: an approval threshold and a hard cap.
+    assert "above_human_approval_threshold" in js
+    assert "over_per_order_cap" in js
+    # And the approval card must actually call it.
+    assert "describeEscalation(r.escalation_reason)" in js
+
+
 def test_safe_helpers_really_escape() -> None:
     """The audit above trusts a list of helpers; check they earn their place."""
     js = Path("app/ui/app.js").read_text()

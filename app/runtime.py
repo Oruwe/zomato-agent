@@ -29,6 +29,7 @@ from pathlib import Path
 from app.config import Settings, get_settings
 from app.core.memory import UserMemory
 from app.core.runs import RunStore
+from app.observability.journal import ensure_dir
 from app.payments.wallet import Wallet, WalletCaps
 from app.security.policy import OrderPolicy, PolicyEngine, policy_from_settings
 
@@ -86,7 +87,7 @@ class RuntimeRegistry:
 
     def _build(self, s: Settings, user_id: str) -> UserRuntime:
         memory_dir = Path(s.memory_path)
-        memory_dir.mkdir(parents=True, exist_ok=True)
+        ensure_dir(memory_dir)
 
         wallet = Wallet(
             WalletCaps(

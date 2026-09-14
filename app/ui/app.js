@@ -221,7 +221,7 @@ function renderLastRun(run) {
     <div class="item" style="margin-top:14px;border-top:1px solid var(--border);border-bottom:0;padding-top:14px">
       <div class="grow">
         <div class="title">${esc(run.restaurant || 'No restaurant chosen')}</div>
-        <div class="meta">${dishes || esc(run.escalation_reason || run.error || '—')}</div>
+        <div class="meta">${dishes || esc(run.escalation_reason ? describeEscalation(run.escalation_reason) : (run.error || '—'))}</div>
         ${inj ? `<div class="meta" style="color:var(--danger)">${inj} manipulation attempt${inj > 1 ? 's' : ''} blocked</div>` : ''}
       </div>
       <div style="text-align:right">
@@ -229,6 +229,35 @@ function renderLastRun(run) {
         <div style="margin-top:4px">${stateTag(run.state)}</div>
       </div>
     </div>`;
+}
+
+/* Policy reasons arrive as machine codes like
+ * `checkout:above_human_approval_threshold:70700>15000`. Those are the right shape for
+ * logs and the audit trail, and the wrong thing to show someone deciding whether to
+ * spend money. Translate to a sentence, falling back to the raw code so a newly added
+ * rule is never silently unexplained. */
+function describeEscalation(reason) {
+  const raw = String(reason || '').trim();
+  if (!raw) return 'Needs your confirmation.';
+
+  let m = /above_human_approval_threshold:(\d+)>(\d+)/.exec(raw);
+  if (m) {
+    return `${rupees(Number(m[1]) / 100)} is over your ${rupeesShort(Number(m[2]) / 100)} auto-approve limit.`;
+  }
+  m = /over_per_order_cap:(\d+)>(\d+)/.exec(raw);
+  if (m) {
+    return `${rupees(Number(m[1]) / 100)} is over your ${rupeesShort(Number(m[2]) / 100)} per-order limit.`;
+  }
+  if (/autonomous_checkout_disabled/.test(raw)) {
+    return 'Unattended ordering is switched off, so this one is up to you.';
+  }
+  m = /outside_order_window:([\d:]+)/.exec(raw);
+  if (m) return `It is ${m[1]}, outside the hours you allow ordering.`;
+  if (/wallet_daily_cap_exceeded/.test(raw)) return "This would go over today's budget.";
+  if (/wallet_monthly_cap_exceeded/.test(raw)) return "This would go over this month's budget.";
+  if (/restaurant_not_in_allowlist/.test(raw)) return 'This restaurant is not on your approved list.';
+  if (/^dry-run/i.test(raw)) return 'Dry run — nothing was ordered.';
+  return raw;
 }
 
 /* ---------- render: approvals ---------- */
@@ -248,7 +277,7 @@ function renderApprovals(s) {
         </div>
         <div class="amt money" style="font-size:19px;font-weight:680">${rupees(r.amount_rupees)}</div>
       </div>
-      <div class="why">${esc(r.escalation_reason || 'Requires your confirmation.')}</div>
+      <div class="why">${esc(describeEscalation(r.escalation_reason))}</div>
       <div class="actions">
         <button class="btn ok sm" data-approve="${esc(r.run_id)}">Approve &amp; order</button>
         <button class="btn danger sm" data-reject="${esc(r.run_id)}">Decline</button>

@@ -16,6 +16,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from app.observability.journal import append_jsonl, ensure_dir
+
 __all__ = ["RunStore", "StoredRun", "ApprovalDecision"]
 
 # In-memory window. Older runs stay on disk and are reloaded on boot.
@@ -79,7 +81,7 @@ class RunStore:
     def __init__(self, base_path: str | Path, user_id: str) -> None:
         safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in user_id)[:64] or "user"
         self._path = Path(base_path) / f"runs.{safe}.jsonl"
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_dir(self._path.parent)
         self._lock = threading.Lock()
         self._runs: OrderedDict[str, StoredRun] = OrderedDict()
         self._load()
@@ -211,9 +213,7 @@ class RunStore:
     def _append(self, stored: StoredRun) -> None:
         from dataclasses import asdict
 
-        line = json.dumps(asdict(stored), separators=(",", ":"), default=str) + "\n"
-        with open(self._path, "a", encoding="utf-8") as fh:
-            fh.write(line)
+        append_jsonl(self._path, asdict(stored))
 
     def _load(self) -> None:
         if not self._path.exists():
