@@ -64,6 +64,25 @@ async def _memory(args) -> int:
     return 0
 
 
+async def _forget(args) -> int:
+    """Erase everything held about a user."""
+    from app.privacy import forget_user
+
+    result = forget_user(get_settings(), user_id=args.user)
+    _print(result)
+    return 0
+
+
+async def _privacy(args) -> int:
+    from app.privacy import PII_INVENTORY
+
+    print(f"{'category':<22}{'on disk':<10}{'to model':<10}where")
+    print("-" * 78)
+    for r in PII_INVENTORY:
+        print(f"{r.category:<22}{str(r.persisted):<10}{str(r.sent_to_model):<10}{r.where[:34]}")
+    return 0
+
+
 async def _bench(args) -> int:
     from evals.bench_hotpath import run_benchmark
 
@@ -86,6 +105,12 @@ def main(argv: list[str] | None = None) -> int:
 
     p_mem = sub.add_parser("memory", help="show learned preferences and wallet state")
     p_mem.set_defaults(fn=_memory)
+
+    p_forget = sub.add_parser("forget", help="erase everything held about a user")
+    p_forget.set_defaults(fn=_forget)
+
+    p_privacy = sub.add_parser("privacy", help="what personal data is held, and where")
+    p_privacy.set_defaults(fn=_privacy)
 
     p_bench = sub.add_parser("bench", help="microbenchmark the control plane")
     p_bench.add_argument("--iterations", type=int, default=20000)

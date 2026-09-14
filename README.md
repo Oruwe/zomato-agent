@@ -128,6 +128,57 @@ fails the build on a raw one.
 
 ---
 
+## Personal data
+
+This is a personal-data system whether or not it looks like one: it knows where you live,
+your phone number, what you eat, when you are free and how much you spend. India's DPDP
+Act 2023 gives people rights over that, so `app/privacy.py` holds the inventory in code
+rather than in a doc that goes stale silently.
+
+| Category | On disk | Sent to model |
+|---|---|---|
+| Phone number | no | no |
+| Delivery address | no — only an opaque `address_id` | no |
+| Name / email | no | no |
+| **Calendar contents** | **no** | **no** |
+| Free time (`lunch gap 13:00–15:00`) | yes | yes |
+| Order history, dietary constraints | yes | yes |
+| Spend totals, mandate ceiling | yes | no |
+
+### Calendar free text never leaves the process
+
+Event titles are needed in memory — to find meal gaps, and to scan invites for injection —
+and they are among the most sensitive strings a person owns. A meal agent needs to know
+*when* you are free, never *what* you are doing.
+
+This was a real bug. Planting `Oncology consult - Dr Rao` in the calendar and grepping the
+journals found it written to disk in plaintext, and the same string was going into the
+planner prompt — so it would have been sent to Google. Both are fixed: only
+`ScheduleGap.private_summary()` (slot, times, duration) is persisted or prompted, and
+`tests/test_privacy.py` plants that appointment on every run and fails if it reappears.
+
+The inventory is **executable**: every category claiming `persisted=False` is checked
+against the actual on-disk state. A privacy note nothing verifies is worth nothing.
+
+### Access and erasure
+
+```bash
+python -m app.cli privacy           # what is held, where
+python -m app.cli forget --user me  # erase it
+```
+
+```
+GET    /api/privacy    what this system holds and why
+GET    /api/me/data    right of access — everything, read from the live stores
+DELETE /api/me/data    right to erasure — a hard delete
+```
+
+Erasure revokes the payment mandate first, since that is the one piece of state that could
+still move money afterwards, then deletes the journals and unlinks the account. It is not a
+soft delete: "deleted" meaning "hidden but retained" is precisely what the right exists to
+prevent. The shared wallet journal is kept, because it records spend for every user of the
+instance and destroying it to honour one person's request would be its own violation.
+
 ## The security model
 
 Three untrusted text channels reach the planner's context:
@@ -428,6 +479,7 @@ app/
   main.py                FastAPI: UI, API, auth, CSRF, rate limits, webhooks
   cli.py                 terminal entry point
   ui/                    dashboard (no build step, strict-CSP safe)
+  privacy.py             PII inventory, right of access, right to erasure
   simulator.py           narrated replay of the agent deciding, for demos
   core/
     agent.py             orchestration loop (deterministic control flow)

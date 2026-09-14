@@ -83,10 +83,29 @@ class ScheduleGap:
         return self.start
 
     def describe(self) -> str:
+        """Full description, including neighbouring event titles.
+
+        For the user's own screen only. Calendar titles are personal data -- "Oncology
+        consult", "Interview at X" -- so this must not be written to disk or sent to a
+        model. Use `private_summary()` for anything that leaves the process.
+        """
         return (
             f"{self.slot} gap {self.start:%H:%M}-{self.end:%H:%M} ({self.minutes} min free)"
             + (f", after '{self.preceding}'" if self.preceding else "")
             + (f", before '{self.following}'" if self.following else "")
+        )
+
+    def private_summary(self) -> str:
+        """The same gap with no calendar free text.
+
+        A meal-ordering agent needs to know *when* you are free, never *what* you are
+        doing. Everything the audit trail must justify -- which slot, how long, when --
+        survives; the part that could end up in a breach or a model provider's logs does
+        not. This is what gets persisted and what reaches the planner.
+        """
+        return (
+            f"{self.slot} gap {self.start:%H:%M}-{self.end:%H:%M} "
+            f"({self.minutes} min free)"
         )
 
 

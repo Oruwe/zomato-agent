@@ -166,8 +166,11 @@ class FoodOrderingAgent:
                 run.flag_injection("calendar", ev.risk_reasons, ev.risk_score)
         run.transition(OrderState.SCHEDULE_READ)
         gaps = self.d.schedule.find_gaps(events, day)
+        # Calendar titles stay in memory: they are needed to find gaps and to scan for
+        # injection, and are personal data the moment they are written down.
         run.record("read_schedule", True,
-                   {"events": len(events), "gaps": [g.describe() for g in gaps],
+                   {"events": len(events),
+                    "gaps": [g.private_summary() for g in gaps],
                     "injection_events": len(run.injection_events)},
                    (now_ns() - t) / 1000.0)
 
@@ -203,7 +206,8 @@ class FoodOrderingAgent:
         # input in the system, so this reads only food words from a closed vocabulary --
         # it can name a dish, never issue an instruction. See app/core/intent.py.
         run.intent = _intent_from_events(events, chosen).to_dict()
-        run.record("select_slot", True, {"slot": chosen.slot, "gap": chosen.describe()})
+        run.record("select_slot", True,
+                   {"slot": chosen.slot, "gap": chosen.private_summary()})
         return chosen
 
     def _already_ordered(

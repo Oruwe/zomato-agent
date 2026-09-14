@@ -46,6 +46,7 @@ from app.integrations.zomato_auth import LoginError
 from app.integrations.zomato_mcp import ZomatoClient, ZomatoError
 from app.observability.latency import REGISTRY
 from app.observability.logger import configure_logging, get_logger, new_trace_id
+from app.privacy import export_user_data, forget_user, inventory
 from app.runtime import runtime_for
 from app.security.auth import (
     SESSION_COOKIE,
@@ -662,6 +663,26 @@ async def drop_mandate(user: str = Depends(current_user)) -> dict[str, Any]:
     if not result.get("ok"):
         raise HTTPException(status.HTTP_404_NOT_FOUND, result.get("error", "not found"))
     return result
+
+
+# --- personal data --------------------------------------------------------------
+
+@app.get("/api/privacy", tags=["privacy"])
+async def privacy_inventory(_: str = Depends(current_user)) -> dict[str, Any]:
+    """What personal data this system holds, where, and why."""
+    return {"inventory": inventory()}
+
+
+@app.get("/api/me/data", tags=["privacy"])
+async def export_my_data(user: str = Depends(current_user)) -> dict[str, Any]:
+    """Right of access: everything held about this person, in one readable payload."""
+    return export_user_data(get_settings(), user_id=user)
+
+
+@app.delete("/api/me/data", tags=["privacy"], dependencies=[Depends(require_csrf)])
+async def erase_my_data(user: str = Depends(current_user)) -> dict[str, Any]:
+    """Right to erasure. A hard delete -- 'hidden but retained' is what this prevents."""
+    return forget_user(get_settings(), user_id=user)
 
 
 @app.get("/api/security", tags=["ops"])

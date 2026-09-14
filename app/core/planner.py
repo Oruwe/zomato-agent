@@ -489,7 +489,9 @@ class GeminiPlanner:
         prompt = build_selection_prompt(
             profile=(profile.to_prompt_block()
                      + (f"\nThe schedule asks for: {wanted}" if wanted else "")),
-            gap_description=gap.describe(),
+            # Never gap.describe(): that carries calendar titles, which would
+            # send the user's diary to a third-party model provider.
+            gap_description=gap.private_summary(),
             slot=gap.slot,
             budget_rupees=budget_paise / 100.0,
             minutes=gap.minutes,
