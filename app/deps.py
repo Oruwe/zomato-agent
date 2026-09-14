@@ -157,6 +157,7 @@ def build_agent(
             memory=rt.memory,
             rail=build_rail(s),
             runs=rt.runs,
+            plans=rt.plans,
             mandates=rt.mandates,
         )
     )

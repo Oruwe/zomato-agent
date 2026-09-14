@@ -17,6 +17,7 @@ import hmac
 import time
 from collections import deque
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.core.planner import get_pool
+from app.core.plans import SLOTS, validate_time
 from app.deps import (
     DEFAULT_USER,
     activate_mandate,
@@ -55,8 +57,15 @@ from app.security.auth import (
     verify_password,
     verify_session,
 )
+from app.security.guardrails import sanitize
 
 log = get_logger(__name__)
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _now_ist() -> datetime:
+    return datetime.now(IST)
 UI_DIR = Path(__file__).parent / "ui"
 
 
@@ -432,6 +441,12 @@ async def dashboard_state(user: str = Depends(current_user)) -> dict[str, Any]:
             "typical_spend_rupees": profile.typical_spend_paise / 100.0,
         },
         "zomato": zomato_auth(s).status(user).to_dict(),
+        "plans": {
+            "date": _now_ist().date().isoformat(),
+            "items": [p.to_dict() for p in rt.plans.for_day(_now_ist().date().isoformat())],
+            "needs_planning": not rt.plans.has_plan_for(_now_ist().date().isoformat()),
+            "slots": list(SLOTS),
+        },
         "payments": mandate_status(s, user_id=user),
         "pending_approvals": [r.to_dict() for r in rt.runs.pending_approvals()],
         "recent_runs": [r.to_dict() for r in rt.runs.list(limit=15)],
@@ -663,6 +678,59 @@ async def drop_mandate(user: str = Depends(current_user)) -> dict[str, Any]:
     if not result.get("ok"):
         raise HTTPException(status.HTTP_404_NOT_FOUND, result.get("error", "not found"))
     return result
+
+
+# --- meal planning --------------------------------------------------------------
+
+class PlanRequest(BaseModel):
+    slot: str = Field(pattern="^(breakfast|lunch|snack|dinner)$")
+    deliver_by: str = Field(min_length=3, max_length=5)
+    request: str = Field(default="", max_length=120)
+    on_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+@app.get("/api/plans", tags=["agent"])
+async def list_plans(user: str = Depends(current_user)) -> dict[str, Any]:
+    """Today's plan, and whether the dashboard should be asking for one."""
+    rt = runtime_for(get_settings(), user)
+    now = datetime.now(IST)
+    today = now.date().isoformat()
+    rt.plans.sweep_missed(now)  # stop showing a deadline that has already gone
+    plans = rt.plans.for_day(today)
+    return {
+        "date": today,
+        "plans": [p.to_dict() for p in plans],
+        # The dashboard prompts whenever nothing is planned for today.
+        "needs_planning": not plans,
+        "next": (n.to_dict() if (n := rt.plans.next_pending(now)) else None),
+        "slots": list(SLOTS),
+    }
+
+
+@app.post("/api/plans", tags=["agent"], dependencies=[Depends(require_csrf)])
+async def create_plan(body: PlanRequest, user: str = Depends(current_user)) -> dict[str, Any]:
+    """Plan a meal for a time you want the food to actually arrive."""
+    try:
+        deliver_by = validate_time(body.deliver_by)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+    rt = runtime_for(get_settings(), user)
+    plan = rt.plans.add(
+        user_id=user, on_date=body.on_date or datetime.now(IST).date().isoformat(),
+        slot=body.slot, deliver_by=deliver_by,
+        # First-party input, but it still reaches a prompt, so it is sanitised like
+        # anything else that does.
+        request=sanitize(body.request, source="user.request", max_len=120).text,
+    )
+    return {"ok": True, "plan": plan.to_dict()}
+
+
+@app.delete("/api/plans/{plan_id}", tags=["agent"], dependencies=[Depends(require_csrf)])
+async def delete_plan(plan_id: str, user: str = Depends(current_user)) -> dict[str, bool]:
+    if not runtime_for(get_settings(), user).plans.remove(plan_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such plan")
+    return {"ok": True}
 
 
 # --- personal data --------------------------------------------------------------

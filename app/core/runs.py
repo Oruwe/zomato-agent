@@ -48,6 +48,8 @@ class StoredRun:
     payment: dict[str, Any] = field(default_factory=dict)
     intent: dict[str, Any] = field(default_factory=dict)
     suggestion: str = ""
+    deliver_by: str | None = None
+    plan_id: str | None = None
     res_id: int | None = None
     dry_run: bool = True
     escalation_reason: str | None = None
@@ -107,6 +109,8 @@ class RunStore:
             payment=dict(getattr(run, "payment", {}) or {}),
             intent=dict(getattr(run, "intent", {}) or {}),
             suggestion=getattr(run, "suggestion", "") or "",
+            deliver_by=getattr(run, "deliver_by", None),
+            plan_id=getattr(run, "plan_id", None),
             res_id=getattr(run, "res_id", None),
             dry_run=run.dry_run,
             escalation_reason=run.escalation_reason,

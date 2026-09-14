@@ -155,6 +155,19 @@ function renderHeader(s) {
 /* ---------- render: today ---------- */
 
 function renderToday(s) {
+  // A stated plan outranks an inferred window: show what they actually asked for.
+  const planned = ((s.plans && s.plans.items) || [])
+    .filter((p) => p.status === 'pending')
+    .sort((a, b) => a.deliver_by.localeCompare(b.deliver_by))[0];
+  if (planned) {
+    $('#nextSlot').textContent = planned.slot;
+    $('#nextWhen').textContent =
+      `You want it by ${planned.deliver_by}`
+      + (planned.request ? ` · ${planned.request}` : '');
+    renderTimeline(s);
+    return;
+  }
+
   const gap = s.schedule.next_gap;
   if (gap) {
     $('#nextSlot').textContent = gap.slot;
@@ -165,6 +178,10 @@ function renderToday(s) {
     $('#nextWhen').textContent = 'Your schedule has no free meal slot left today.';
   }
 
+  renderTimeline(s);
+}
+
+function renderTimeline(s) {
   // Timeline: events and gaps merged and ordered by start time.
   const rows = [];
   s.schedule.events.forEach((e) => rows.push({
@@ -446,6 +463,94 @@ function renderAccount(z, config) {
     toast('Disconnected.');
     await refresh();
   });
+}
+
+/* ---------- render: the day planner ---------- */
+
+const PLAN_STATUS = {
+  pending: ['', 'waiting'],
+  ordered: ['placed', 'ordered'],
+  missed: ['failed', 'missed'],
+  skipped: ['rejected', 'removed'],
+};
+
+/* A time here is when the food should ARRIVE, not when to order. The agent works
+ * backwards from it, so the copy has to say so plainly or people will enter the wrong
+ * number and get cold food. */
+function renderPlans(plans) {
+  const host = $('#planHost');
+  if (!plans) { host.innerHTML = ''; return; }
+
+  const items = plans.items || [];
+  const prompt = plans.needs_planning
+    ? `<div class="prompt">
+         <h2>What do you want today?</h2>
+         <p>Tell the agent when you want food in your hands and it works backwards —
+            ordering early enough to arrive by then, not at then.</p>
+       </div>`
+    : '';
+
+  const rows = items.map((p) => {
+    const [cls, label] = PLAN_STATUS[p.status] || ['', p.status];
+    return `<div class="planrow">
+        <span class="slot">${esc(p.slot)}</span>
+        <span class="by money">${esc(p.deliver_by)}</span>
+        <span class="what">${esc(p.request || 'anything good')}</span>
+        <span class="tag ${esc(cls)}">${esc(label)}</span>
+        ${p.status === 'pending'
+          ? `<button class="x" data-drop="${esc(p.plan_id)}" title="Remove">×</button>`
+          : ''}
+      </div>`;
+  }).join('');
+
+  const options = (plans.slots || []).map(
+    (s) => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
+
+  host.innerHTML = `
+    ${prompt}
+    <div class="card">
+      <h2>Your day</h2>
+      <p class="sub">Times are when the food should <strong>arrive</strong>.</p>
+      ${rows || '<div class="empty" style="padding:18px">Nothing planned yet.</div>'}
+      <div class="planform">
+        <select id="planSlot" aria-label="Meal">${options}</select>
+        <input type="time" id="planTime" value="13:00" aria-label="Arrive by">
+        <input type="text" id="planWhat" placeholder="biryani with sides (optional)"
+               maxlength="120" aria-label="What you want">
+        <button class="btn sm" id="planAdd">Add</button>
+      </div>
+    </div>`;
+
+  const add = async () => {
+    const btn = $('#planAdd');
+    btn.disabled = true;
+    try {
+      await api('/api/plans', {
+        method: 'POST',
+        body: JSON.stringify({
+          slot: $('#planSlot').value,
+          deliver_by: $('#planTime').value,
+          request: $('#planWhat').value,
+        }),
+      });
+      toast('Planned. The agent will order in time for it.');
+      await refresh();
+    } catch (err) {
+      toast(err.message, true);
+      btn.disabled = false;
+    }
+  };
+  $('#planAdd').addEventListener('click', add);
+  $('#planWhat').addEventListener('keydown', (e) => { if (e.key === 'Enter') add(); });
+
+  host.querySelectorAll('[data-drop]').forEach((b) =>
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      try {
+        await api(`/api/plans/${encodeURIComponent(b.dataset.drop)}`, { method: 'DELETE' });
+        await refresh();
+      } catch (err) { toast(err.message, true); b.disabled = false; }
+    }));
 }
 
 /* ---------- render: approvals ---------- */
@@ -899,6 +1004,7 @@ async function refresh() {
 
   renderHeader(state);
   renderZomato(state.zomato);
+  renderPlans(state.plans);
   renderAccount(state.zomato, state.config);
   renderToday(state);
   renderApprovals(state);

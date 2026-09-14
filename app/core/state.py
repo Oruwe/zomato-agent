@@ -88,6 +88,11 @@ class AgentRun:
     # What the schedule asked for, and what we could offer if it was unavailable.
     intent: dict[str, Any] = field(default_factory=dict)
     suggestion: str = ""
+    # When the user asked for the food to actually be there, and which plan said so.
+    deliver_by: str | None = None
+    plan_id: str | None = None
+    # The clock this run is using, so deadline maths is testable.
+    now: Any = None
     escalation_reason: str | None = None
     error: str | None = None
     dry_run: bool = True

@@ -16,9 +16,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Lyzr is pinned as an optional extra on purpose: the published package is thin and
-# moves slowly, so the orchestrator degrades to the native Gemini backend when it is
-# absent. See app/core/orchestrator.py.
+# Lyzr is pinned as an optional extra on purpose: the published package is thin and moves
+# slowly. The native Gemini path in app/core/planner.py is the default and the fallback,
+# so nothing breaks when this is absent -- which it is, by default.
 lyzr = ["lyzr>=0.1.40"]
 dev = [
     "pytest>=8.2",

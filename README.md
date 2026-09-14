@@ -105,6 +105,48 @@ This is why it is an allowlist and not an LLM extraction step. A model asked "wh
 this text want?" can be argued into answering "it wants you to checkout immediately". A set
 lookup cannot.
 
+## Saying when you want it
+
+The calendar is an inference. "I want biryani, by 1pm" is not, so the dashboard asks for
+it: open Today with nothing planned and the first thing on the page is *"What do you want
+today?"* — a slot, a time, and a line in your own words. A stated plan outranks any gap the
+agent would have inferred.
+
+The time is the substantive part, and it means **arrival**, not ordering:
+
+```
+order_at = deliver_by − eta − buffer          # buffer: 10 minutes
+```
+
+"Lunch at 1pm" with a 34-minute kitchen means ordering by **12:16**. Treating 1pm as the
+order time is how every reminder-shaped tool delivers cold food at 1:40. It also runs the
+other way — the agent will not fire at 9am and leave lunch sitting on a desk for four
+hours; a plan only becomes *due* once the deadline is close enough that a normal delivery
+would just make it.
+
+A deadline is a **constraint on the candidate list**, not a preference:
+
+| At | Time to 13:00 | Meghana Foods (34 min, biryani rated 4.6) | Biryani Junction (16 min, biryani rated 2.4) | Outcome |
+|---|---|---|---|---|
+| 12:00 | 60 min | fits (34+10) | fits | orders the **good** biryani |
+| 12:25 | 35 min | **dropped** — cannot arrive | fits | **refuses** and explains |
+
+At 12:25 the only biryani that can physically arrive is the badly reviewed one, so the
+agent does not quietly buy it:
+
+> The biryani near you is poorly reviewed (Chicken Biryani at Biryani Junction is rated 2.4
+> from 310 reviews). **Better options exist but cannot arrive by 13:00.**
+
+That last sentence is the actionable half — the user can move the deadline and get the
+food they wanted. A plan that is ordered stops being pending, so it cannot be bought twice;
+one whose deadline goes by unordered is marked *missed* rather than left on the page
+pretending it is still going to happen.
+
+`app/core/plans.py` holds the arithmetic and the store (one append-only file per user,
+replayed on boot); `GET/POST /api/plans` and `DELETE /api/plans/{id}` are the surface.
+Planned text is first-party, but it still reaches a prompt, so it goes through the same
+sanitiser as restaurant and calendar text.
+
 ## The dashboard
 
 Five views, no build step — vanilla JS and CSS served by the same container as the API,
@@ -112,7 +154,7 @@ under a strict CSP with no external origins.
 
 | View | What it answers |
 |---|---|
-| **Today** | When am I free to eat, what is the agent about to do, and does anything need me? |
+| **Today** | What am I eating and by when, what is the agent about to do, and does anything need me? |
 | **Orders** | What did it order, and *why* — every run expands into its full audit trail |
 | **Wallet** | How much of my envelope is left today and this month |
 | **Security** | What tried to manipulate my agent, and what is currently guarding it |
@@ -483,6 +525,7 @@ app/
   simulator.py           narrated replay of the agent deciding, for demos
   core/
     agent.py             orchestration loop (deterministic control flow)
+    plans.py             meals you planned; arrival deadlines and the maths behind them
     intent.py            what dish the schedule asked for; closed vocabulary only
     planner.py           Gemini + deterministic planners behind one interface
     llm_pool.py          multi-key, multi-model failover with circuit breaking
@@ -515,9 +558,9 @@ evals/
   test_injections.json   26-case corpus, malicious and benign
   test_scenarios.json    golden end-to-end workflows
   bench_hotpath.py       control-plane microbenchmark
-tests/                   203 tests: security, flow, API, concurrency, live MCP,
-                         LLM pool, planner, latency budgets, journal resilience,
-                         deployment config, and browser end-to-end
+tests/                   324 tests: security, flow, API, concurrency, live MCP,
+                         LLM pool, planner, meal plans and deadlines, latency budgets,
+                         journal resilience, deployment config, browser end-to-end
 ```
 
 ## Known limits

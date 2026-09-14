@@ -39,6 +39,10 @@ __all__ = ["FoodOrderingAgent", "AgentDeps"]
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+# Slack between the estimated arrival and a deadline. Estimates are optimistic, and being
+# early is free while being late is the entire failure.
+_DELIVERY_BUFFER_MIN = 10
+
 # How far either side of a meal window an event still counts as being "about" that meal.
 _INTENT_WINDOW = timedelta(hours=3)
 
@@ -89,6 +93,8 @@ class AgentDeps:
     # Standing authorisation to debit without asking. Absent means the agent may not
     # move money on its own, however much envelope the wallet still has.
     mandates: object | None = None
+    # Meals the user planned explicitly. A stated plan beats an inferred gap.
+    plans: object | None = None
 
 
 class FoodOrderingAgent:
@@ -114,6 +120,7 @@ class FoodOrderingAgent:
         )
         canary, nonce = make_canary(), new_nonce()
         current = now or datetime.now(IST)
+        run.now = current
         log.info("agent run started", extra={"run_id": run.run_id, "dry_run": s.dry_run})
 
         try:
@@ -173,6 +180,32 @@ class FoodOrderingAgent:
                     "gaps": [g.private_summary() for g in gaps],
                     "injection_events": len(run.injection_events)},
                    (now_ns() - t) / 1000.0)
+
+        # An explicit plan outranks an inferred window: the user told us, so stop guessing.
+        planned = self._planned_meal(slot, current, day)
+        if planned is not None:
+            window = next((w for w in MEAL_WINDOWS if w.name == planned.slot), None)
+            chosen = ScheduleGap(
+                slot=planned.slot,
+                # The gap runs up to the deadline, so "how long do I have" means "how long
+                # until the food must be here" rather than how long the diary is free.
+                start=current,
+                end=planned.deadline,
+                keyword=window.default_keyword if window else planned.slot,
+            )
+            run.deliver_by = planned.deadline.isoformat()
+            run.plan_id = planned.plan_id
+            run.transition(OrderState.SLOT_SELECTED)
+            run.slot = planned.slot
+            run.order_date = planned.on_date
+            run.intent = extract_intent(
+                planned.request, source=f"plan:{planned.plan_id}"
+            ).to_dict()
+            run.record("select_slot", True,
+                       {"slot": planned.slot, "planned": True,
+                        "deliver_by": planned.deliver_by,
+                        "minutes_left": planned.minutes_left(current)})
+            return chosen
 
         chosen: ScheduleGap | None
         if slot:
@@ -241,6 +274,31 @@ class FoodOrderingAgent:
                         "existing_run_id": existing.run_id})
         return True
 
+    @staticmethod
+    def _deadline_dropped_options(run: AgentRun) -> bool:
+        return any(st.step == "deadline_filter" and st.detail.get("dropped")
+                   for st in run.steps)
+
+    def _close_plan(self, run: AgentRun) -> None:
+        """Mark a plan handled, so the dashboard stops asking for it."""
+        if self.d.plans is None or not run.plan_id:
+            return
+        from app.core.plans import PlanStatus
+
+        self.d.plans.mark(run.plan_id, PlanStatus.ORDERED, run_id=run.run_id)
+
+    def _planned_meal(self, slot: str | None, now: datetime, day: date | None):
+        """A plan the user made that it is time to act on."""
+        store = self.d.plans
+        if store is None:
+            return None
+        on_date = (day or now.date()).isoformat()
+        if slot:
+            plan = store.for_slot(on_date, slot)
+            return plan if plan is not None and plan.pending else None
+        due = store.due(now)
+        return due[0] if due else None
+
     def _mandate_for(self, run: AgentRun, amount_paise: int):
         """Resolve the standing authorisation covering this debit.
 
@@ -300,6 +358,22 @@ class FoodOrderingAgent:
         # Re-check locally: the search backend is free to ignore the filter, and a rating
         # floor the user set is a requirement, not a hint.
         restaurants = [r for r in restaurants if r.rating >= min_rating]
+
+        # A deadline turns delivery time from a preference into a constraint. "Lunch at
+        # 1pm" means the food is there at 1pm; a place that cannot make it is not a
+        # candidate, however good it is.
+        if run.deliver_by:
+            deadline = datetime.fromisoformat(run.deliver_by)
+            minutes = int((deadline - (run.now or datetime.now(IST))).total_seconds() // 60)
+            in_time = [r for r in restaurants
+                       if not r.eta_minutes or r.eta_minutes + _DELIVERY_BUFFER_MIN <= minutes]
+            dropped = len(restaurants) - len(in_time)
+            if in_time:
+                restaurants = in_time
+            if dropped:
+                run.record("deadline_filter", True,
+                           {"minutes_to_deadline": minutes, "dropped": dropped,
+                            "kept": len(in_time)})
         for r in restaurants:
             if r.risk_score:
                 run.flag_injection(f"zomato:{r.res_id}", r.risk_reasons, r.risk_score)
@@ -363,6 +437,13 @@ class FoodOrderingAgent:
         # unless the user opted in, surface it and let them decide.
         if not selection.matched_intent and not self.d.settings.auto_substitute:
             run.state = OrderState.REJECTED
+            # With a deadline, "in range" means "can get here in time", which is worth
+            # spelling out: the user can have the better option by allowing longer.
+            if run.deliver_by and self._deadline_dropped_options(run):
+                selection.suggestion += (
+                    f" Better options exist but cannot arrive by "
+                    f"{datetime.fromisoformat(run.deliver_by):%H:%M}."
+                )
             run.suggestion = selection.suggestion
             run.escalation_reason = selection.suggestion
             run.record("intent_unmet", False,
@@ -519,6 +600,7 @@ class FoodOrderingAgent:
                 cuisines=selection.cuisines, amount_paise=cart.total_paise,
                 meal_slot=gap.slot, simulated=True,
             )
+            self._close_plan(run)
             run.record("checkout", True,
                        {"simulated": True, "reason": run.escalation_reason})
             return
@@ -601,3 +683,4 @@ class FoodOrderingAgent:
         run.record("checkout", True,
                    {"order_id": run.order_id, "amount_paise": cart.total_paise,
                     "payment": outcome.to_dict()})
+        self._close_plan(run)
