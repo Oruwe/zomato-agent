@@ -34,7 +34,8 @@ Also available from the terminal:
 python -m app.cli run --slot breakfast   # watch it route around an injected merchant
 python -m app.cli memory                 # what it has learned about you
 python -m app.cli bench                  # control-plane latency profile
-pytest -q                                # 152 tests, incl. µs latency budgets
+pytest -q                                # 170 tests, incl. µs latency budgets
+pytest -q -m "not ui"                    # skip the browser tests (no Chromium needed)
 python -m evals.eval_runner              # red-team corpus + golden workflows
 ```
 
@@ -290,6 +291,12 @@ spend caps reset on restart. Set `MEMORY_PATH=/data/memory`.
 Startup **refuses to boot** in `ENVIRONMENT=prod` without `APP_PASSWORD` and
 `SESSION_SECRET`, or with live money enabled and no `WEBHOOK_SHARED_SECRET`.
 
+State writes are deliberately non-fatal. They record something that has already
+happened — the order is placed, the wallet is debited — so raising there turns a lost
+audit line into a failed request and a wrong view of a real order. They self-heal if the
+directory vanishes, and the wallet counts any lost commit and reports it in its snapshot,
+because an unjournalled commit is not replayed on restart and would reset the daily cap.
+
 Logs are single-line JSON on stdout, which Render parses into queryable fields. A
 `trace_id` threads through each run, and a redaction pass strips phone numbers, emails,
 addresses, API keys and canary tokens before anything is emitted.
@@ -329,6 +336,7 @@ app/
     calendar_mcp.py      schedule reader and meal-gap interval arithmetic
     mocks/fixtures.py    offline catalogue — two fixtures carry live injection payloads
   observability/
+    journal.py           append-only writes that self-heal and never fail the caller
     logger.py            JSON formatter with redaction, Render-tuned
     latency.py           ns-resolution registry, percentiles, CI budget assertions
 evals/
@@ -336,8 +344,9 @@ evals/
   test_injections.json   26-case corpus, malicious and benign
   test_scenarios.json    golden end-to-end workflows
   bench_hotpath.py       control-plane microbenchmark
-tests/                   152 tests: security, flow, API, concurrency, live MCP,
-                         LLM pool, latency budgets, deployment config
+tests/                   170 tests: security, flow, API, concurrency, live MCP,
+                         LLM pool, planner, latency budgets, journal resilience,
+                         deployment config, and browser end-to-end
 ```
 
 ## Known limits

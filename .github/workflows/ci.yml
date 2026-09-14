@@ -22,10 +22,27 @@ jobs:
         run: ruff check app evals tests
 
       - name: Unit, API, concurrency and latency-budget tests
-        run: pytest -q
+        run: pytest -q -m "not ui"
 
       - name: Security and behavioural evals
         run: python -m evals.eval_runner
+
+  ui:
+    # The dashboard is the product surface and three real bugs there were found only by
+    # looking at it: a login panel painted over the app, every time in the wrong zone,
+    # and raw policy codes shown to the user. None are visible to an API test.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -e ".[dev,ui]"
+      - name: Install Chromium
+        run: python -m playwright install --with-deps chromium
+      - name: Browser tests
+        run: pytest -q -m ui
 
   package:
     # The dashboard is served from files inside the installed package, so a wheel that

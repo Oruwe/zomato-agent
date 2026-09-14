@@ -27,6 +27,9 @@ dev = [
     "ruff>=0.5",
     "pyyaml>=6.0",       # deployment-config tests parse render.yaml and the CI workflow
 ]
+# Browser tests. Kept separate because they need a Chromium download; the suite skips
+# them automatically when Playwright is absent, so `pip install -e ".[dev]"` stays light.
+ui = ["playwright>=1.45"]
 
 [project.scripts]
 zomato-agent = "app.cli:main"
@@ -42,6 +45,7 @@ packages = ["app"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning"]
+markers = ["ui: browser tests; need playwright + chromium, skipped without them"]
 
 [tool.ruff]
 line-length = 100
