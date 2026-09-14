@@ -104,6 +104,15 @@ class Settings(BaseSettings):
     # Simple in-process rate limiting, per client IP.
     rate_limit_per_minute: int = 60
     rate_limit_run_per_minute: int = 10
+    rate_limit_auth_per_minute: int = 8
+    # Largest accepted request body. Every endpoint here takes a small JSON object, so
+    # anything larger is a mistake or an attempt to exhaust memory.
+    max_request_bytes: int = 64 * 1024
+    # Only trust X-Forwarded-For behind a proxy that actually sets it. Left on by
+    # default, a client can rotate the header to defeat every rate limit -- including
+    # the one guarding the endpoint that spends money. Render terminates TLS in front
+    # of the service, so it is enabled there via render.yaml.
+    trust_proxy: bool = False
 
     @field_validator("log_level")
     @classmethod

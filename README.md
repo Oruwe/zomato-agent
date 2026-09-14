@@ -34,7 +34,7 @@ Also available from the terminal:
 python -m app.cli run --slot breakfast   # watch it route around an injected merchant
 python -m app.cli memory                 # what it has learned about you
 python -m app.cli bench                  # control-plane latency profile
-pytest -q                                # 146 tests, incl. µs latency budgets
+pytest -q                                # 152 tests, incl. µs latency budgets
 python -m evals.eval_runner              # red-team corpus + golden workflows
 ```
 
@@ -79,6 +79,19 @@ Defence is layered, and the layers have honestly different strengths.
 fullwidth homoglyphs), nonce-tagged delimiter isolation so injected text cannot forge a
 closing tag, a weighted pattern scorer, and a canary token that aborts the run if the
 system prompt ever leaks into output.
+
+**Perimeter.** Session auth on every route, CSRF via a required custom header, strict CSP
+and frame/sniff protections, per-IP rate limits (tighter on the endpoint that spends
+money, tightest on login), and a body-size cap. Two bypasses were found by testing the
+perimeter rather than trusting it:
+
+- **Rate limits were defeated by a header.** `X-Forwarded-For` is client-controlled unless
+  a trusted proxy overwrites it, and it was trusted unconditionally — so rotating it
+  bought unlimited paid orders. It is now consulted only when `TRUST_PROXY` is set, which
+  `render.yaml` enables because Render terminates TLS in front of the service.
+- **Login had no brute-force protection.** Fifteen password guesses passed unthrottled.
+  Login now has its own bucket plus a process-wide cap, because one password protects the
+  whole service and a per-client limit is defeated by anyone with two addresses.
 
 **Deterministic (provides the guarantee).** `app/security/policy.py` validates every
 proposed tool call in ordinary Python: the tool must be on the allowlist, `variant_id`
@@ -323,7 +336,7 @@ evals/
   test_injections.json   26-case corpus, malicious and benign
   test_scenarios.json    golden end-to-end workflows
   bench_hotpath.py       control-plane microbenchmark
-tests/                   146 tests: security, flow, API, concurrency, live MCP,
+tests/                   152 tests: security, flow, API, concurrency, live MCP,
                          LLM pool, latency budgets, deployment config
 ```
 

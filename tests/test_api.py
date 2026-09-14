@@ -372,6 +372,78 @@ def test_run_endpoint_is_rate_limited(env) -> None:
     assert 429 in codes, f"expected throttling, got {codes}"
 
 
+def test_forwarded_header_cannot_bypass_the_limit(env) -> None:
+    """X-Forwarded-For is client-controlled unless a trusted proxy overwrites it.
+
+    Trusting it unconditionally let anyone rotate the header and place unlimited paid
+    orders; the wallet still capped total spend, but a stranger could burn the user's
+    entire daily budget.
+    """
+    env(RATE_LIMIT_RUN_PER_MINUTE="3", TRUST_PROXY="false")
+    from app.main import app
+
+    with TestClient(app) as c:
+        codes = [
+            c.post("/api/run", json={"slot": "lunch"},
+                   headers={**MUTATE, "X-Forwarded-For": f"10.0.0.{i}"}).status_code
+            for i in range(8)
+        ]
+    assert 429 in codes, f"rotating the header defeated the limit: {codes}"
+    assert codes.count(200) <= 3
+
+
+def test_forwarded_header_is_honoured_behind_a_trusted_proxy(env) -> None:
+    """With TRUST_PROXY on, distinct real clients must not share one another's budget."""
+    env(RATE_LIMIT_RUN_PER_MINUTE="2", TRUST_PROXY="true")
+    from app.main import app
+
+    with TestClient(app) as c:
+        a = c.post("/api/run", json={"slot": "lunch"},
+                   headers={**MUTATE, "X-Forwarded-For": "203.0.113.1"}).status_code
+        b = c.post("/api/run", json={"slot": "dinner"},
+                   headers={**MUTATE, "X-Forwarded-For": "203.0.113.2"}).status_code
+    assert a == 200 and b == 200
+
+
+def test_oversized_body_is_rejected_before_handling(env) -> None:
+    env(MAX_REQUEST_BYTES="2048")
+    from app.main import app
+
+    with TestClient(app) as c:
+        resp = c.post("/api/memory/preference",
+                      json={"likes": ["x" * 50_000]}, headers=MUTATE)
+    assert resp.status_code == 413
+
+
+def test_login_is_rate_limited_against_brute_force(env) -> None:
+    env(APP_PASSWORD="hunter2", SESSION_SECRET="s", RATE_LIMIT_AUTH_PER_MINUTE="4")
+    from app.main import app
+
+    with TestClient(app) as c:
+        codes = [
+            c.post("/api/login", json={"password": f"guess{i}"}).status_code
+            for i in range(12)
+        ]
+    assert 429 in codes, "unlimited password guesses were allowed"
+    assert codes.count(401) <= 4
+
+
+def test_login_has_a_process_wide_cap(env) -> None:
+    """One password protects the whole service, so the global guess rate is what counts."""
+    env(APP_PASSWORD="hunter2", SESSION_SECRET="s", RATE_LIMIT_AUTH_PER_MINUTE="2",
+        TRUST_PROXY="true")
+    from app.main import app
+
+    with TestClient(app) as c:
+        codes = [
+            c.post("/api/login", json={"password": f"guess{i}"},
+                   headers={"X-Forwarded-For": f"198.51.100.{i}"}).status_code
+            for i in range(20)
+        ]
+    # Per-client limits alone are defeated by anyone with more than one address.
+    assert codes.count(401) <= 6, f"too many guesses reached the password check: {codes}"
+
+
 def test_healthz_is_never_rate_limited(env) -> None:
     env(RATE_LIMIT_PER_MINUTE="1")
     from app.main import app

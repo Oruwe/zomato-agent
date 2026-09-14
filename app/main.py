@@ -160,11 +160,35 @@ _LIMITER = _RateLimiter()
 
 
 def _client_ip(request: Request) -> str:
-    # Render terminates TLS and forwards the original IP; trust only the first hop.
-    fwd = request.headers.get("x-forwarded-for", "")
-    if fwd:
-        return fwd.split(",")[0].strip()
+    """Identify the caller for rate limiting.
+
+    X-Forwarded-For is client-controlled unless a trusted proxy overwrites it, so it is
+    consulted only when `trust_proxy` is set. Trusting it unconditionally let anyone
+    rotate the header and bypass every limit, including the one on the endpoint that
+    places paid orders.
+    """
+    if get_settings().trust_proxy:
+        fwd = request.headers.get("x-forwarded-for", "")
+        if fwd:
+            return fwd.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
+
+
+@app.middleware("http")
+async def limit_body_size(request: Request, call_next):
+    """Reject oversized bodies before they are read into memory.
+
+    Every endpoint takes a small JSON object. Without this, an unauthenticated POST with
+    a multi-gigabyte body is buffered before any handler or auth check runs.
+    """
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > get_settings().max_request_bytes:
+                return JSONResponse({"detail": "request body too large"}, status_code=413)
+        except ValueError:
+            return JSONResponse({"detail": "invalid content-length"}, status_code=400)
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -173,11 +197,25 @@ async def rate_limit(request: Request, call_next):
     path = request.url.path
     if path in ("/healthz", "/readyz") or path.startswith("/static"):
         return await call_next(request)
-    bucket = "run" if path in ("/api/run", "/webhook/schedule-tick") else "default"
-    limit = s.rate_limit_run_per_minute if bucket == "run" else s.rate_limit_per_minute
-    if not _LIMITER.check(bucket, _client_ip(request), limit):
+    if path == "/api/login":
+        bucket, limit = "auth", s.rate_limit_auth_per_minute
+    elif path in ("/api/run", "/webhook/schedule-tick"):
+        bucket, limit = "run", s.rate_limit_run_per_minute
+    else:
+        bucket, limit = "default", s.rate_limit_per_minute
+
+    client = _client_ip(request)
+    if not _LIMITER.check(bucket, client, limit):
         log.warning("rate limited", extra={"path": path, "bucket": bucket})
         return JSONResponse({"detail": "rate limit exceeded"}, status_code=429)
+
+    # Login also carries a process-wide cap. This is a single-password service, so the
+    # total guess rate is what matters; a per-client limit alone is defeated by anyone
+    # with more than one source address.
+    if bucket == "auth" and not _LIMITER.check("auth", "*global*", limit * 3):
+        log.warning("global auth rate limit reached", extra={"path": path})
+        return JSONResponse({"detail": "too many login attempts"}, status_code=429)
+
     return await call_next(request)
 
 

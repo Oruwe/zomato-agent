@@ -38,6 +38,10 @@ services:
         value: gemini-2.5-flash
       - key: GEMINI_MODEL_FALLBACKS
         value: gemini-2.5-flash-lite,gemini-2.0-flash
+      # Render terminates TLS in front of the service and sets X-Forwarded-For, so the
+      # header is trustworthy here. It must stay false anywhere the app is exposed direct.
+      - key: TRUST_PROXY
+        value: "true"
       - key: RATE_LIMIT_PER_MINUTE
         value: "60"
       - key: RATE_LIMIT_RUN_PER_MINUTE

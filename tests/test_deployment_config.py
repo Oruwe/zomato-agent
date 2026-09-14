@@ -46,6 +46,16 @@ def test_production_secrets_are_not_committed() -> None:
             assert entry.get("sync") is False or entry.get("generateValue") is True
 
 
+def test_blueprint_trusts_the_proxy_only_where_there_is_one() -> None:
+    """Render sets X-Forwarded-For; the default stays off for direct exposure."""
+    from app.config import Settings
+
+    web = next(s for s in _render()["services"] if s["type"] == "web")
+    env = {e["key"]: e.get("value") for e in web["envVars"]}
+    assert env.get("TRUST_PROXY") == "true"
+    assert Settings().trust_proxy is False, "trusting the header by default is unsafe"
+
+
 def test_blueprint_ships_safe_defaults() -> None:
     """A fresh deploy must not spend money before the operator opts in."""
     web = next(s for s in _render()["services"] if s["type"] == "web")
