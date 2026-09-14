@@ -34,7 +34,7 @@ Also available from the terminal:
 python -m app.cli run --slot breakfast   # watch it route around an injected merchant
 python -m app.cli memory                 # what it has learned about you
 python -m app.cli bench                  # control-plane latency profile
-pytest -q                                # 203 tests, incl. µs latency budgets
+pytest -q                                # 372 tests, incl. µs latency budgets
 pytest -q -m "not ui"                    # skip the browser tests (no Chromium needed)
 python -m evals.eval_runner              # red-team corpus + golden workflows
 ```
@@ -282,22 +282,71 @@ verified against the live schema:
 payment_method_type: enum ["upi", "cash_on_delivery"]
 ```
 
-That leaves three real options, and only one is genuinely hands-free:
+That leaves three ways to settle, and which one is hands-free is less obvious than it
+looks:
 
 | Option | Who takes the money | Agent autonomy |
 |---|---|---|
-| `cash_on_delivery` | The user, at the door | **Zero-touch.** The only fully autonomous path today |
-| `upi` | Zomato sends a collect request to the user's UPI app | **One tap.** NPCI *requires* that authentication; no agent can bypass it |
-| Become the merchant | You charge the user, then you pay Zomato | Zero-touch, but you are a payments intermediary and need an RBI Payment Aggregator licence |
+| `upi`, **absorbed by Zomato Money** | Zomato, from the user's own balance | **Zero-touch.** No collect request is raised at all |
+| `upi`, **balance short** | Zomato sends a collect request to the user's UPI app | **One tap.** NPCI *requires* that authentication; no agent can bypass it |
+| `cash_on_delivery` | The user, at the door | **Order placed with no tap**, but money still changes hands later |
+
+The first row is the one worth understanding. There is no wallet value in the checkout
+enum — but Zomato applies a user's Zomato Money *during* a `upi` checkout, and when the
+balance covers the bill it simply debits it and raises nothing. The wallet is reachable;
+it is just not addressable.
 
 Razorpay and the `PaymentRail` abstraction in this repo **cannot pay the Zomato bill**.
 They are the agent's own pre-authorisation ledger: evidence the user consented to
 autonomous spend up to a cap, and a record of what was actually spent. A UPI Autopay
 mandate debits to *your* merchant account, not to Zomato's.
 
-The practical recommendation: `cash_on_delivery` for a fully autonomous demo, `upi` for
-real orders. The one-tap UPI approval is arguably a feature — it is the moment a person
-confirms that software spent their money.
+## Settling without interrupting anybody
+
+The priority is a payment nobody has to touch. The obstacle is that **the balance cannot
+be read** — Zomato's MCP exposes no balance tool, so the agent cannot look before it
+leaps. It has to predict, and then find out.
+
+```
+balance covers the bill  →  upi, Zomato absorbs it        →  nothing to approve
+balance falls short      →  cash on delivery, no approval →  pay the rider
+cash not permitted       →  upi collect request           →  one tap
+nothing permitted        →  refuse, rather than guess a rail
+```
+
+The rail is chosen **before the cart exists**, because Zomato bakes `payment_type` into
+the cart and it cannot be changed at checkout. If the real total then comes back higher
+than the estimate, the *promise* is withdrawn rather than the rail swapped: telling
+someone nothing needs approving and then sending them a collect request is worse than
+never having promised.
+
+### The estimate corrects itself
+
+A declared balance is a number that goes stale, and a stale one makes the agent claim
+"nothing to approve" on every order forever — which is exactly how a user learns to stop
+believing it. Since there is no balance API, the only feedback available is what orders
+actually do:
+
+| What happened | What it proves | What the agent writes down |
+|---|---|---|
+| Settled with no human step | The wallet covered it | Subtract the bill |
+| Raised a collect request we did not expect | The estimate was too high | Write it down to just under that bill |
+
+Not to zero, note — being short of a ₹486 bill says nothing about being short of ₹50, and
+zeroing it would throw away a figure that is still useful. **One wrong prediction is
+enough to stop making it.**
+
+```bash
+ZOMATO_MONEY_BALANCE_INR=2000    # what you say is in there
+MOCK_ZOMATO_MONEY_INR=20         # offline only: what the simulated account really has
+```
+
+Setting the second below the first is how you watch the correction fire on camera.
+
+`zero_touch` stays honest throughout: true only when payment completed with no human
+action at all, which cash on delivery never is. The settlement decision, the ladder walk
+and the correction are all recorded in the run's audit trail — `tests/test_settlement.py`
+covers the lot.
 
 ## Connecting a Zomato account
 
@@ -326,8 +375,10 @@ filter and a rating floor the user set is a requirement rather than a hint.
 
 Two constraints shaped this, both verified against the live APIs rather than assumed:
 
-1. **Zomato's MCP has no wallet rail.** `create_cart.payment_type` and
-   `checkout_cart.payment_method_type` are enums of exactly `upi | cash_on_delivery`.
+1. **Zomato's MCP has no wallet *value*, and no balance tool.** `create_cart.payment_type`
+   and `checkout_cart.payment_method_type` are enums of exactly `upi | cash_on_delivery`.
+   Zomato Money is still spendable — Zomato applies it during a `upi` checkout — but the
+   agent can neither address it nor read it, only predict it. See above.
 2. **Zomato collects payment itself.** No third-party processor can settle its checkout.
 
 So "wallet" here is an **agent-side pre-authorised spend envelope**, not a stored-value
@@ -496,6 +547,23 @@ double-orders.
 Mount the disk — the wallet journal, run history and memory must outlive a deploy, or
 spend caps reset on restart. Set `MEMORY_PATH=/data/memory`.
 
+### What is actually deployed
+
+**https://zomato-agent.onrender.com** — Singapore, auto-deploying from
+`claude/relaxed-pasteur-ocamoj`, password-gated, `DRY_RUN=true` and `PAYMENT_RAIL=mock`
+so no real money can move.
+
+Two caveats that matter when demoing it, both consequences of the free plan:
+
+- **First load takes ~50 seconds.** Free instances spin down after 15 minutes idle.
+- **State resets on restart.** There is no persistent disk, so `MEMORY_PATH` is
+  ephemeral: the ledger, run history and meal plans do not survive a redeploy. Harmless
+  under a mock rail — but **a persistent volume is a prerequisite for live money**, or
+  spend caps reset themselves and the envelope guarantee is worthless.
+
+The three cron ticks in `render.yaml` are *not* deployed on the free plan, so the agent
+does not fire at meal times on its own there; runs are started from the dashboard.
+
 Startup **refuses to boot** in `ENVIRONMENT=prod` without `APP_PASSWORD` and
 `SESSION_SECRET`, or with live money enabled and no `WEBHOOK_SHARED_SECRET`.
 
@@ -514,6 +582,9 @@ addresses, API keys and canary tokens before anything is emitted.
 ## Layout
 
 ```
+agent.yml                declarative contract, asserted against the code by tests
+SOUL.md                  what the agent is, and what it is not
+EXPLAINABILITY.md        how it decides, what it reads, what it cannot do
 app/
   config.py              typed settings; money in integer paise throughout
   runtime.py             per-user shared state + the lock that prevents overspend
@@ -540,6 +611,8 @@ app/
   payments/
     base.py              PaymentRail protocol, Money (integer minor units)
     wallet.py            reserve → commit / release spend envelope
+    settlement.py        which rail settles this order, and who has to touch it
+    balance.py           the Zomato Money estimate, and how it corrects itself
     razorpay_rail.py     UPI Autopay mandates, webhook HMAC verification
     mock_rail.py         deterministic offline rail
   integrations/
@@ -558,9 +631,10 @@ evals/
   test_injections.json   26-case corpus, malicious and benign
   test_scenarios.json    golden end-to-end workflows
   bench_hotpath.py       control-plane microbenchmark
-tests/                   324 tests: security, flow, API, concurrency, live MCP,
-                         LLM pool, planner, meal plans and deadlines, latency budgets,
-                         journal resilience, deployment config, browser end-to-end
+tests/                   372 tests: security, flow, API, concurrency, live MCP,
+                         LLM pool, planner, meal plans and deadlines, settlement and
+                         balance, manifest drift, latency budgets, journal resilience,
+                         deployment config, browser end-to-end
 ```
 
 ## Known limits
@@ -578,3 +652,10 @@ tests/                   324 tests: security, flow, API, concurrency, live MCP,
   optional extra rather than a hard dependency.
 - **Detection patterns are tuned to this corpus.** A novel injection phrasing may score
   clean — which is exactly why the policy engine, not the scorer, is what bounds spend.
+- **The Zomato Money balance is a prediction, not a reading.** There is no balance tool
+  on the MCP. The agent works from a declared figure and corrects it from outcomes, so
+  the first order after the balance changes underneath it can still guess wrong — it
+  just cannot guess wrong twice the same way.
+- **The zero-touch wallet path has never run against live Zomato.** It is implemented
+  from the documented behaviour and reproduced in the mock; `zero_touch` exists partly to
+  make the first real one observable.
