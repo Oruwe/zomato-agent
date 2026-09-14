@@ -116,9 +116,15 @@ def inventory() -> list[dict[str, Any]]:
     return [asdict(r) for r in PII_INVENTORY]
 
 
+# Every per-user store writes one file named for the user. Erasure has to remove all of
+# them, and a store added without being listed here would quietly survive a deletion --
+# so tests/test_settlement.py asserts that nothing bearing the user's name is left behind.
+_USER_FILE_PREFIXES = ("", "runs.", "plans.", "zomato_money.")
+
+
 def _user_files(base: Path, user_id: str) -> list[Path]:
     safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in user_id)[:64] or "user"
-    return [base / f"{safe}.jsonl", base / f"runs.{safe}.jsonl"]
+    return [base / f"{prefix}{safe}.jsonl" for prefix in _USER_FILE_PREFIXES]
 
 
 def export_user_data(
@@ -170,6 +176,7 @@ def forget_user(
     # Withdraw the standing payment authorisation first: it is the one piece of state
     # that could still move money after the rest is gone.
     revoked = rt.mandates.revoke(user_id) is not None
+    rt.zomato_money.forget()
 
     base = Path(s.memory_path)
     removed: list[str] = []

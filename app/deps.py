@@ -148,7 +148,8 @@ def build_agent(
         AgentDeps(
             settings=s,
             zomato=ZomatoClient(
-                s, mcp_session=zomato_session or user_session or live_zomato
+                s, mcp_session=zomato_session or user_session or live_zomato,
+                wallet_balance=lambda: rt.zomato_money.paise,
             ),
             address_id=account.default_address_id,
             schedule=ScheduleReader(s, mcp_session=calendar_session or live_calendar),
@@ -159,6 +160,7 @@ def build_agent(
             runs=rt.runs,
             plans=rt.plans,
             mandates=rt.mandates,
+            zomato_money=rt.zomato_money,
         )
     )
 

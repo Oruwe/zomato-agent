@@ -93,6 +93,11 @@ class AgentRun:
     plan_id: str | None = None
     # The clock this run is using, so deadline maths is testable.
     now: Any = None
+    # Which Zomato rail settled this order, whether Zomato Money was expected to absorb
+    # it, and whether the run completed without the user having to do anything.
+    settlement: str | None = None
+    expect_wallet: bool = False
+    human_less: bool = False
     escalation_reason: str | None = None
     error: str | None = None
     dry_run: bool = True

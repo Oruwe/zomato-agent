@@ -74,6 +74,28 @@ class Settings(BaseSettings):
     # `upi` or `cash_on_delivery`; the wallet authorises, this rail executes.
     zomato_settlement_type: ZomatoPaymentType = "upi"
 
+    # ---- Zomato Money -----------------------------------------------------------
+    # The priority is a payment nobody has to touch. Zomato applies a user's Zomato
+    # Money balance during a `upi` checkout and raises no collect request when it
+    # covers the bill, so that is the hands-off path -- but there is no balance tool
+    # on the MCP, so the figure below is a declared estimate, corrected by what orders
+    # actually do. Zero means "not set up"; the agent then does not promise the wallet.
+    zomato_money_balance_inr: float = 0.0
+    # When the balance will not cover the bill, fall back to cash on delivery so the
+    # order still goes out without an approval step. Off means fall back to a UPI
+    # collect request instead, which needs a tap.
+    cash_fallback_when_short: bool = True
+
+    # What the *simulated* Zomato account really holds, for offline runs. Kept separate
+    # from the declared estimate on purpose: setting it lower is how you demonstrate the
+    # agent predicting wrong and correcting itself. -1 means "same as declared", which
+    # makes the happy path work without configuring two numbers.
+    mock_zomato_money_inr: float = -1.0
+
+    @property
+    def zomato_money_balance_paise(self) -> int:
+        return int(round(self.zomato_money_balance_inr * 100))
+
     max_per_order_inr: float = 1000.0
     daily_cap_inr: float = 1500.0
     # UPI Circle caps full delegation to a secondary user -- the slot an agent occupies

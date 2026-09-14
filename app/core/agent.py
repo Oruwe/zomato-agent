@@ -29,6 +29,7 @@ from app.integrations.zomato_mcp import MenuItem, Restaurant, ZomatoClient, Zoma
 from app.observability.latency import now_ns
 from app.observability.logger import get_logger, new_trace_id, trace_id_var
 from app.payments.base import Money, PaymentIntent
+from app.payments.settlement import choose_settlement
 from app.payments.wallet import Wallet, WalletDenied
 from app.security.guardrails import make_canary, new_nonce
 from app.security.policy import Decision, PolicyEngine
@@ -95,6 +96,8 @@ class AgentDeps:
     mandates: object | None = None
     # Meals the user planned explicitly. A stated plan beats an inferred gap.
     plans: object | None = None
+    # Estimated Zomato Money, so the agent can prefer the hands-off rail.
+    zomato_money: object | None = None
 
 
 class FoodOrderingAgent:
@@ -278,6 +281,52 @@ class FoodOrderingAgent:
     def _deadline_dropped_options(run: AgentRun) -> bool:
         return any(st.step == "deadline_filter" and st.detail.get("dropped")
                    for st in run.steps)
+
+    # -- settlement -------------------------------------------------------------
+    def _wallet_covers(self, amount_paise: int) -> bool:
+        store = self.d.zomato_money
+        return bool(store is not None and store.covers(amount_paise))
+
+    def _choose_settlement(self, run: AgentRun, amount_paise: int):
+        """Pick the rail for this order, preferring one nobody has to touch."""
+        s = self.d.settings
+        store = self.d.zomato_money
+        balance = store.paise if store is not None else None
+        choice = choose_settlement(
+            amount_paise,
+            balance_paise=balance,
+            allowed=self.d.policy.policy.allowed_payment_types,
+            prefer_cash_when_short=s.cash_fallback_when_short,
+        )
+        log.info("settlement chosen",
+                 extra={"run_id": run.run_id, "wire_type": choice.wire_type,
+                        "expect_wallet": choice.expect_wallet,
+                        "human_less": choice.human_less})
+        return choice
+
+    def _reconcile_balance(self, run: AgentRun, outcome) -> None:
+        """Correct the Zomato Money estimate against what the order actually did.
+
+        This is the only feedback available: Zomato publishes no balance, so a prediction
+        that turns out wrong is the signal. A wrong prediction that is not written down
+        repeats on every future order.
+        """
+        store = self.d.zomato_money
+        if store is None or not run.expect_wallet:
+            return
+        if outcome.zero_touch:
+            store.spend(run.amount_paise)
+            run.human_less = True
+            run.record("balance_reconciled", True,
+                       {"spent_paise": run.amount_paise,
+                        "balance_paise": store.paise, "confirmed": "wallet covered it"})
+        elif outcome.needs_user:
+            # We said this would need no approval and it does. The estimate was too high.
+            store.mark_insufficient(run.amount_paise)
+            run.human_less = False
+            run.record("balance_reconciled", False,
+                       {"balance_paise": store.paise,
+                        "corrected": "Zomato Money did not cover the bill after all"})
 
     def _close_plan(self, run: AgentRun) -> None:
         """Mark a plan handled, so the dashboard stops asking for it."""
@@ -515,11 +564,23 @@ class FoodOrderingAgent:
         return alternative
 
     async def _step_cart(self, run: AgentRun, selection: Selection, address_id: str):
-        s = self.d.settings
+        # The rail is decided here, before the cart exists, because Zomato bakes the
+        # payment type into the cart itself -- it cannot be changed at checkout.
+        settlement = self._choose_settlement(run, selection.estimated_total_paise)
+        if not settlement.ok:
+            run.state = OrderState.REJECTED
+            run.escalation_reason = settlement.reason
+            run.record("settlement", False, settlement.to_dict())
+            return None
+        run.settlement = settlement.wire_type
+        run.expect_wallet = settlement.expect_wallet
+        run.human_less = settlement.human_less
+        run.record("settlement", True, settlement.to_dict())
+
         cart_args = {
             "res_id": selection.res_id,
             "items": selection.items,
-            "payment_type": s.zomato_settlement_type,
+            "payment_type": settlement.wire_type,
         }
         verdict = self.d.policy.validate("create_cart", cart_args)
         if verdict.decision is Decision.DENY:
@@ -538,7 +599,7 @@ class FoodOrderingAgent:
         try:
             cart = await self.d.zomato.create_cart(
                 res_id=selection.res_id, items=wire_items,
-                address_id=address_id, payment_type=s.zomato_settlement_type,
+                address_id=address_id, payment_type=settlement.wire_type,
             )
         except ZomatoError as exc:
             run.state = OrderState.FAILED
@@ -551,6 +612,19 @@ class FoodOrderingAgent:
         run.amount_paise = cart.total_paise
         run.record("create_cart", True,
                    {"cart_id": cart.cart_id, "total_paise": cart.total_paise})
+
+        # Zomato applies offers and fees server-side, so the real total can exceed the
+        # estimate the rail was chosen against. The rail is baked into the cart and
+        # cannot be changed now -- but the *promise* can be withdrawn, and should be:
+        # telling the user nothing needs approving and then sending them a collect
+        # request is worse than not having promised.
+        if run.expect_wallet and not self._wallet_covers(cart.total_paise):
+            run.expect_wallet = False
+            run.human_less = False
+            run.record("settlement_revised", True,
+                       {"reason": "cart total exceeded the estimated Zomato Money balance",
+                        "estimated_paise": selection.estimated_total_paise,
+                        "total_paise": cart.total_paise})
         return cart
 
     async def _step_checkout(
@@ -574,7 +648,7 @@ class FoodOrderingAgent:
         verdict = self.d.policy.validate(
             "checkout",
             {"cart_id": cart.cart_id, "amount_paise": cart.total_paise,
-             "payment_method_type": s.zomato_settlement_type},
+             "payment_method_type": run.settlement or s.zomato_settlement_type},
             local_now=current,
             held_paise=hold.amount_paise,
         )
@@ -654,7 +728,8 @@ class FoodOrderingAgent:
 
         try:
             order = await self.d.zomato.checkout(
-                cart_id=cart.cart_id, payment_method_type=s.zomato_settlement_type
+                cart_id=cart.cart_id,
+                payment_method_type=run.settlement or s.zomato_settlement_type,
             )
         except ZomatoError as exc:
             self.d.wallet.release(hold.hold_id)
@@ -663,7 +738,9 @@ class FoodOrderingAgent:
             run.record("checkout", False, {"error": str(exc)})
             return
 
-        outcome = parse_checkout(order, payment_type=s.zomato_settlement_type)
+        settlement_used = run.settlement or s.zomato_settlement_type
+        outcome = parse_checkout(order, payment_type=settlement_used)
+        self._reconcile_balance(run, outcome)
         if outcome.state == OrderPaymentState.FAILED:
             self.d.wallet.release(hold.hold_id)
             run.state = OrderState.FAILED

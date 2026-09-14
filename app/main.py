@@ -273,6 +273,12 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class ZomatoMoneyRequest(BaseModel):
+    # Zomato publishes no balance API, so the user tells us. Bounded so a typo cannot
+    # declare a balance that makes the agent promise hands-off payment forever.
+    balance_inr: float = Field(ge=0, le=100_000)
+
+
 class RunRequest(BaseModel):
     user_id: str = Field(default=DEFAULT_USER)
     slot: str | None = Field(default=None, pattern="^(breakfast|lunch|snack|dinner)$")
@@ -409,6 +415,7 @@ async def dashboard_state(user: str = Depends(current_user)) -> dict[str, Any]:
             "monthly_cap_rupees": int(wallet["monthly_cap_paise"]) / 100.0,
             "per_order_cap_rupees": int(wallet["per_order_cap_paise"]) / 100.0,
         },
+        "zomato_money": rt.zomato_money.view().to_dict(),
         "stats": rt.runs.stats(),
         "schedule": {
             "events": [
@@ -554,6 +561,23 @@ async def reject(
     if not result.get("ok"):
         raise HTTPException(status.HTTP_404_NOT_FOUND, result.get("error", "not found"))
     return result
+
+
+@app.get("/api/wallet/zomato-money", tags=["money"])
+async def zomato_money_state(user: str = Depends(current_user)) -> dict[str, Any]:
+    """The estimated Zomato Money balance the settlement ladder decides against."""
+    return runtime_for(get_settings(), user).zomato_money.view().to_dict()
+
+
+@app.post("/api/wallet/zomato-money", tags=["money"],
+          dependencies=[Depends(require_csrf)])
+async def declare_zomato_money(
+    body: ZomatoMoneyRequest, user: str = Depends(current_user)
+) -> dict[str, Any]:
+    """Tell the agent what is in Zomato Money, so it can prefer the hands-off rail."""
+    rt = runtime_for(get_settings(), user)
+    view = rt.zomato_money.declare(int(round(body.balance_inr * 100)))
+    return {"ok": True, "zomato_money": view.to_dict()}
 
 
 @app.get("/api/wallet", tags=["money"])

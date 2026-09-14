@@ -47,18 +47,26 @@ vocabulary of food words: the calendar can name a dish and cannot express an ins
 
 ### Known Limits
 
-**It does not hold or spend a Zomato Money balance.** Zomato is the merchant of record
-and its MCP exposes no balance or wallet tool — checkout accepts `upi` or
-`cash_on_delivery` and nothing else. The internal wallet is a spend *envelope* that
-authorises an amount; it does not store value and does not move money.
+**It cannot read the Zomato Money balance, only predict it.** The wallet is reachable
+but not addressable: Zomato applies a user's Zomato Money during a `upi` checkout and
+raises no collect request when the balance covers the bill, which is the genuinely
+hands-off path. But the MCP exposes no balance tool, and its checkout enum is exactly
+`upi` and `cash_on_delivery` — there is no wallet value to send. So the agent decides
+against a balance the user declares, and corrects it from outcomes: an order that settles
+with no human step is subtracted, and one that raises a collect request when the wallet
+was expected to cover it writes the estimate down below that bill. One wrong prediction
+is enough to stop making it.
 
-**Therefore there is no zero-click checkout on UPI.** A UPI order returns
-`payment_pending` with a `upi://pay` intent the user approves in their own UPI app. Only
-cash on delivery completes without a human touch. An agent that could silently debit a
-bank account is not a feature this system withholds — it is a rail that does not exist
-for third parties. NPCI's Unified Agent Protocol and UPI Circle are the mechanisms being
-built for it, and they cap delegation at ₹15,000/month, which is where the monthly cap
-default comes from.
+**When the balance falls short, the order still goes out.** It switches to cash on
+delivery, which is placed without an approval step — the money changes hands at the door
+instead. `zero_touch` is reported honestly: true only when payment completed with no
+human action at all, which cash never is.
+
+**The agent still cannot debit a bank account.** Third-party UPI debit is a rail that
+does not exist, not a feature withheld. NPCI's Unified Agent Protocol and UPI Circle are
+the mechanisms being built for it, and they cap delegation at ₹15,000/month, which is
+where the monthly cap default comes from. The internal wallet is a spend *envelope* that
+authorises an amount; it does not store value.
 
 **Injection detection is best-effort.** Pattern scoring is tuned to a 26-case corpus and
 a novel phrasing may score clean. This is why the policy engine, not the scorer, is what

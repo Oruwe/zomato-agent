@@ -31,6 +31,7 @@ from app.core.memory import UserMemory
 from app.core.plans import MealPlanStore
 from app.core.runs import RunStore
 from app.observability.journal import ensure_dir
+from app.payments.balance import ZomatoMoneyBalance
 from app.payments.mandates import MandateStore
 from app.payments.wallet import Wallet, WalletCaps
 from app.security.policy import OrderPolicy, PolicyEngine, policy_from_settings
@@ -49,6 +50,7 @@ class UserRuntime:
     runs: RunStore
     plans: MealPlanStore
     mandates: MandateStore
+    zomato_money: ZomatoMoneyBalance
     policy: PolicyEngine
     lock: asyncio.Lock
 
@@ -56,6 +58,7 @@ class UserRuntime:
         return {
             "user_id": self.user_id,
             "wallet": self.wallet.snapshot(),
+            "zomato_money": self.zomato_money.view().to_dict(),
             "runs": self.runs.stats(),
         }
 
@@ -105,6 +108,9 @@ class RuntimeRegistry:
         runs = RunStore(memory_dir, user_id)
         plans = MealPlanStore(memory_dir, user_id)
         mandates = MandateStore(memory_dir)
+        zomato_money = ZomatoMoneyBalance(
+            memory_dir, user_id, initial_paise=s.zomato_money_balance_paise or None
+        )
 
         base: OrderPolicy = policy_from_settings(s)
         policy = PolicyEngine(
@@ -122,6 +128,7 @@ class RuntimeRegistry:
             runs=runs,
             plans=plans,
             mandates=mandates,
+            zomato_money=zomato_money,
             policy=policy,
             lock=asyncio.Lock(),
         )

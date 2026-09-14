@@ -113,6 +113,24 @@ money:
     human_approval_above: 800
   semantics: reserve -> commit | release, journalled with fsync before the call returns
 
+  # The priority is a payment nobody has to touch. Zomato applies a user's Zomato Money
+  # balance during a `upi` checkout and raises no collect request when it covers the
+  # bill -- that is the hands-off path. There is no balance tool on the MCP and no wallet
+  # value in its checkout enum, so the agent works from a declared estimate and corrects
+  # it against what orders actually do.
+  settlement:
+    ladder: [zomato_money, cash_on_delivery, upi]
+    balance: a declared estimate, corrected by outcomes; never presented as a reading
+    rules:
+      - balance covers the bill -> upi, expecting Zomato Money to absorb it (no human)
+      - balance falls short     -> cash on delivery, placed with no approval step
+      - cash not permitted      -> upi collect request, which the user approves
+      - nothing permitted       -> the run is refused rather than guessing a rail
+    corrections:
+      settled with no human step: subtract the bill from the estimate
+      raised a collect request we did not expect: write the estimate below that bill
+    decided_by: deterministic code; the planner's output never reaches this choice
+
 # --- safety ----------------------------------------------------------------------
 #
 # All three must be deliberately flipped before a rupee can move. The defaults are

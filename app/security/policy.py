@@ -246,11 +246,29 @@ class PolicyEngine:
         return PolicyDecision(Decision.ALLOW, [], {"amount_paise": amount})
 
 
+def _permitted_payment_types(settings) -> frozenset[str]:  # noqa: ANN001
+    """Which Zomato rails the settlement ladder may choose between.
+
+    Derived from configuration, never from the planner. The ladder proposes a rail and
+    this allowlist disposes -- so a rail the user has not enabled cannot be reached, and
+    an allowlist of one would silently disable the fallback it is supposed to have.
+    """
+    allowed = {settings.zomato_settlement_type}
+    # Zomato applies Zomato Money during a `upi` checkout, so a declared balance is only
+    # spendable if upi is permitted.
+    if settings.zomato_money_balance_paise > 0:
+        allowed.add("upi")
+    # The fallback that keeps an order going out without an approval step.
+    if settings.cash_fallback_when_short:
+        allowed.add("cash_on_delivery")
+    return frozenset(allowed)
+
+
 def policy_from_settings(settings) -> OrderPolicy:  # noqa: ANN001
     return OrderPolicy(
         max_per_order_paise=settings.max_per_order_paise,
         human_approval_above_paise=settings.human_approval_above_paise,
-        allowed_payment_types=frozenset({settings.zomato_settlement_type}),
+        allowed_payment_types=_permitted_payment_types(settings),
         dry_run=settings.dry_run,
         allow_autonomous_checkout=settings.allow_autonomous_checkout,
     )

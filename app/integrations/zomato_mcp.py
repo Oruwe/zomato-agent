@@ -112,11 +112,24 @@ class _TTLCache:
 class ZomatoClient:
     """Facade over the Zomato MCP. ``use_mocks=True`` runs fully offline."""
 
-    def __init__(self, settings: Settings, mcp_session: Any | None = None) -> None:
+    def __init__(self, settings: Settings, mcp_session: Any | None = None,
+                 wallet_balance: Any | None = None) -> None:
         self.settings = settings
         self._session = mcp_session
         self._cache = _TTLCache(settings.catalog_cache_ttl_s)
         self.use_mocks = settings.use_mocks or mcp_session is None
+        # Callable returning the simulated Zomato Money balance in paise, so an offline
+        # checkout can reproduce the one behaviour that makes this product hands-off:
+        # Zomato absorbing the bill and raising no collect request.
+        self._wallet_balance = wallet_balance
+
+    def _mock_wallet_paise(self) -> int | None:
+        configured = self.settings.mock_zomato_money_inr
+        if configured >= 0:
+            return int(round(configured * 100))
+        if self._wallet_balance is None:
+            return None
+        return self._wallet_balance()
 
     # -- addresses --------------------------------------------------------------
     async def get_saved_addresses(self) -> list[dict]:
@@ -246,8 +259,14 @@ class ZomatoClient:
             # Mirror the real rails: cash is placed outright, UPI sends a collect request
             # the user must approve. A mock that always says "placed" would hide the one
             # step that actually decides whether food arrives.
+            wallet = self._mock_wallet_paise()
             if payment_method_type == "cash_on_delivery":
                 payload = {"order_id": order_id, "status": "placed"}
+            elif wallet is not None and wallet >= cart["total_paise"]:
+                # Zomato applies the user's Zomato Money and raises no collect request.
+                # This is the zero-touch path, and it is the whole point of the feature,
+                # so the mock has to be able to produce it.
+                payload = {"order_id": order_id, "status": "paid", "paid_from": "zomato_money"}
             else:
                 payload = {
                     "order_id": order_id,
