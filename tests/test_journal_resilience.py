@@ -113,6 +113,7 @@ async def test_order_still_succeeds_when_state_dir_is_removed(tmp_path) -> None:
         use_mocks=True, payment_rail="mock", gemini_api_key="",
         memory_path=str(tmp_path / "state"), dry_run=False,
         allow_autonomous_checkout=True, max_per_order_inr=1000,
+        zomato_settlement_type="cash_on_delivery",
         daily_cap_inr=5000, monthly_cap_inr=100000, human_approval_above_inr=1000,
     )
     first = await execute_run(s, user_id="u", slot="lunch", now=NOON)

@@ -22,6 +22,10 @@ from app.integrations.zomato_auth import ZomatoAuth
 from app.integrations.zomato_mcp import ZomatoClient
 from app.observability.logger import get_logger
 from app.payments.base import Money, PaymentError, PaymentIntent
+from app.payments.mandates import (
+    UPI_CIRCLE_MONTHLY_CAP_PAISE,
+    StoredMandate,
+)
 from app.payments.mock_rail import MockRail
 from app.payments.wallet import WalletDenied
 from app.runtime import UserRuntime, runtime_for
@@ -30,7 +34,9 @@ log = get_logger(__name__)
 
 __all__ = [
     "build_agent", "build_rail", "execute_run", "approve_run", "reject_run",
-    "set_sessions", "get_sessions", "zomato_auth", "reset_zomato_auth", "DEFAULT_USER",
+    "set_sessions", "get_sessions", "zomato_auth", "reset_zomato_auth",
+    "setup_mandate", "activate_mandate", "revoke_mandate", "mandate_status",
+    "DEFAULT_USER",
 ]
 
 DEFAULT_USER = "default"
@@ -151,6 +157,7 @@ def build_agent(
             memory=rt.memory,
             rail=build_rail(s),
             runs=rt.runs,
+            mandates=rt.mandates,
         )
     )
 
@@ -272,3 +279,89 @@ def reject_run(
         return {"ok": False, "error": "run not found or not pending"}
     log.info("run rejected by user", extra={"run_id": run_id, "reason": reason[:200]})
     return {"ok": True, "run": stored.to_dict()}
+
+
+async def setup_mandate(
+    settings: Settings | None = None,
+    *,
+    user_id: str = DEFAULT_USER,
+    max_amount_inr: float | None = None,
+    contact: str = "",
+    name: str = "",
+) -> dict:
+    """Create the standing authorisation that lets the agent pay without asking.
+
+    The user approves this once, in their UPI app. Everything after it is autonomous
+    within the ceiling they set here.
+    """
+    s = settings or get_settings()
+    rt = runtime_for(s, user_id)
+    rail = build_rail(s)
+
+    requested = int(round((max_amount_inr or s.razorpay_mandate_max_amount_inr) * 100))
+    ceiling = min(requested, UPI_CIRCLE_MONTHLY_CAP_PAISE)
+    if ceiling < requested:
+        log.info("mandate ceiling reduced to the UPI Circle limit",
+                 extra={"requested_paise": requested, "applied_paise": ceiling})
+
+    customer_ref = None
+    if hasattr(rail, "create_customer") and contact and rail.name == "razorpay":
+        try:
+            customer_ref = await rail.create_customer(name=name or "Meal Agent user",
+                                                      contact=contact)
+        except PaymentError as exc:
+            return {"ok": False, "error": f"could not create customer: {exc}"}
+
+    try:
+        ref = await rail.create_mandate(
+            customer_ref=customer_ref or user_id, max_amount=Money(ceiling)
+        )
+    except PaymentError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    mandate = rt.mandates.record(StoredMandate(
+        user_id=user_id, rail=ref.rail, mandate_id=ref.mandate_id,
+        customer_ref=ref.customer_ref, max_amount_paise=ceiling,
+        test_mode=rail.name == "mock" or s.razorpay_key_id.startswith("rzp_test_"),
+        raw=ref.raw,
+    ))
+
+    # The mock rail has nothing for a user to approve, so it is usable immediately.
+    # A real rail waits for the user to authorise in their UPI app, confirmed by webhook.
+    if rail.name == "mock":
+        mandate = rt.mandates.activate(user_id) or mandate
+
+    return {"ok": True, "mandate": mandate.to_dict(),
+            "requires_approval": rail.name != "mock"}
+
+
+def activate_mandate(settings: Settings | None = None, *, user_id: str = DEFAULT_USER) -> dict:
+    """Mark a mandate authorised. Driven by the provider webhook in production."""
+    rt = runtime_for(settings or get_settings(), user_id)
+    mandate = rt.mandates.activate(user_id)
+    if mandate is None:
+        return {"ok": False, "error": "no mandate to activate"}
+    return {"ok": True, "mandate": mandate.to_dict()}
+
+
+def revoke_mandate(settings: Settings | None = None, *, user_id: str = DEFAULT_USER) -> dict:
+    """Withdraw consent. The agent stops being able to move money immediately."""
+    rt = runtime_for(settings or get_settings(), user_id)
+    mandate = rt.mandates.revoke(user_id)
+    if mandate is None:
+        return {"ok": False, "error": "no mandate on file"}
+    return {"ok": True, "mandate": mandate.to_dict()}
+
+
+def mandate_status(settings: Settings | None = None, *, user_id: str = DEFAULT_USER) -> dict:
+    s = settings or get_settings()
+    rt = runtime_for(s, user_id)
+    mandate = rt.mandates.get(user_id)
+    return {
+        "settlement": s.zomato_settlement_type,
+        # Cash on delivery needs no standing authorisation: no money moves at order time.
+        "needs_mandate": s.zomato_settlement_type != "cash_on_delivery",
+        "rail": s.payment_rail,
+        "mandate": mandate.to_dict() if mandate else None,
+        "upi_circle_cap_rupees": UPI_CIRCLE_MONTHLY_CAP_PAISE / 100.0,
+    }

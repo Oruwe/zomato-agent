@@ -30,6 +30,7 @@ from app.config import Settings, get_settings
 from app.core.memory import UserMemory
 from app.core.runs import RunStore
 from app.observability.journal import ensure_dir
+from app.payments.mandates import MandateStore
 from app.payments.wallet import Wallet, WalletCaps
 from app.security.policy import OrderPolicy, PolicyEngine, policy_from_settings
 
@@ -45,6 +46,7 @@ class UserRuntime:
     wallet: Wallet
     memory: UserMemory
     runs: RunStore
+    mandates: MandateStore
     policy: PolicyEngine
     lock: asyncio.Lock
 
@@ -99,6 +101,7 @@ class RuntimeRegistry:
         )
         memory = UserMemory(user_id, memory_dir, max_events=s.memory_max_events)
         runs = RunStore(memory_dir, user_id)
+        mandates = MandateStore(memory_dir)
 
         base: OrderPolicy = policy_from_settings(s)
         policy = PolicyEngine(
@@ -114,6 +117,7 @@ class RuntimeRegistry:
             wallet=wallet,
             memory=memory,
             runs=runs,
+            mandates=mandates,
             policy=policy,
             lock=asyncio.Lock(),
         )

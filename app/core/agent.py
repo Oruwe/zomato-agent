@@ -52,6 +52,9 @@ class AgentDeps:
     # The address the user picked in the dashboard. None falls back to their Zomato
     # default, which is what a single-address account will have anyway.
     address_id: str | None = None
+    # Standing authorisation to debit without asking. Absent means the agent may not
+    # move money on its own, however much envelope the wallet still has.
+    mandates: object | None = None
 
 
 class FoodOrderingAgent:
@@ -194,6 +197,29 @@ class FoodOrderingAgent:
                  extra={"run_id": run.run_id, "slot": gap.slot,
                         "existing_run_id": existing.run_id})
         return True
+
+    def _mandate_for(self, run: AgentRun, amount_paise: int):
+        """Resolve the standing authorisation covering this debit.
+
+        Returns ``(mandate, reason)``; mandate is None when the agent may not pay. The
+        reason is returned rather than recorded here so the caller records exactly one
+        audit entry with the true cause -- recording in both places overwrote
+        "out of headroom" with "no mandate", which is a different and wrong story.
+
+        Checked in code rather than trusted to the planner: a mandate is the user's
+        consent, and its ceiling is enforced by the rail too, so an over-ceiling debit
+        would be declined anyway. Failing here is clearer than failing there.
+        """
+        store = self.d.mandates
+        if store is None:
+            return None, "no_mandate_store"
+        mandate = store.active_for(run.user_id)
+        if mandate is None:
+            existing = store.get(run.user_id)
+            return None, (f"mandate_{existing.status}" if existing else "no_active_mandate")
+        if amount_paise > mandate.remaining_paise:
+            return None, "mandate_headroom_exhausted"
+        return mandate, "ok"
 
     def _budget(self, run: AgentRun) -> int:
         snap = self.d.wallet.snapshot()
@@ -372,14 +398,38 @@ class FoodOrderingAgent:
                        {"simulated": True, "reason": run.escalation_reason})
             return
 
+        # Cash on delivery moves no money now -- the user pays the rider -- so there is
+        # no rail leg at all. This is the only genuinely zero-touch settlement available
+        # through Zomato's MCP today.
+        cod = s.zomato_settlement_type == "cash_on_delivery"
+
         # Live path. Charge the rail first so a wallet commit always has a payment behind
         # it, then place the order, then make the spend permanent.
-        if self.d.rail is not None:
+        if self.d.rail is not None and not cod:
+            mandate, reason = self._mandate_for(run, cart.total_paise)
+            if mandate is None:
+                # No standing authorisation covering this amount: the agent may not move
+                # money on its own, however much wallet envelope is left.
+                self.d.wallet.release(hold.hold_id)
+                run.state = OrderState.AWAITING_APPROVAL
+                run.escalation_reason = (
+                    "This order needs more headroom than your payment authorisation has "
+                    "left. Raise it, or approve this one by hand."
+                    if reason == "mandate_headroom_exhausted"
+                    else "No active payment authorisation. Authorise autonomous payment "
+                         "once, or switch settlement to cash on delivery."
+                )
+                run.record("mandate_check", False, {"reason": reason})
+                return
+            run.record("mandate_check", True,
+                       {"mandate_id": mandate.mandate_id,
+                        "remaining_paise": mandate.remaining_paise})
             intent = PaymentIntent(
                 amount=Money(cart.total_paise),
                 idempotency_key=f"{run.run_id}:{cart.cart_id}",
                 description=f"{selection.restaurant_name} ({gap.slot})",
                 order_ref=cart.cart_id,
+                mandate=mandate.as_ref(),
             )
             result = await self.d.rail.charge(intent)
             run.record("rail_charge", result.ok,
@@ -389,7 +439,11 @@ class FoodOrderingAgent:
                 self.d.wallet.release(hold.hold_id)
                 run.state = OrderState.FAILED
                 run.error = result.error or "payment rail declined"
+                if self.d.mandates is not None:
+                    self.d.mandates.fail(run.user_id, run.error)
                 return
+            if self.d.mandates is not None:
+                self.d.mandates.record_debit(run.user_id, cart.total_paise)
 
         try:
             order = await self.d.zomato.checkout(

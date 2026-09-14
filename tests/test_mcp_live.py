@@ -118,6 +118,7 @@ def _settings(tmp_path, **over) -> Settings:
         use_mocks=False, payment_rail="mock", gemini_api_key="",
         memory_path=str(tmp_path / "memory"), dry_run=True,
         allow_autonomous_checkout=False, max_per_order_inr=1000,
+        zomato_settlement_type="cash_on_delivery",
         daily_cap_inr=1500, monthly_cap_inr=20000, human_approval_above_inr=800,
         zomato_mcp_url="", calendar_mcp_url="",
     )

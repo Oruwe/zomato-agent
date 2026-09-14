@@ -37,6 +37,7 @@ def _settings(tmp_path, **over) -> Settings:
         use_mocks=True, payment_rail="mock", gemini_api_key="",
         memory_path=str(tmp_path / "memory"), dry_run=False,
         allow_autonomous_checkout=True, max_per_order_inr=1000,
+        zomato_settlement_type="cash_on_delivery",
         daily_cap_inr=5000, monthly_cap_inr=100000, human_approval_above_inr=1000,
     )
     base.update(over)
@@ -145,6 +146,8 @@ async def test_api_exposes_force(tmp_path, monkeypatch) -> None:
     for k, v in {
         "USE_MOCKS": "true", "DRY_RUN": "false", "ALLOW_AUTONOMOUS_CHECKOUT": "true",
         "PAYMENT_RAIL": "mock", "GEMINI_API_KEY": "", "APP_PASSWORD": "",
+        # COD: this test is about the force flag, not the payment leg.
+        "ZOMATO_SETTLEMENT_TYPE": "cash_on_delivery",
         "MEMORY_PATH": str(tmp_path / "api"), "HUMAN_APPROVAL_ABOVE_INR": "1000",
         "DAILY_CAP_INR": "5000", "RATE_LIMIT_RUN_PER_MINUTE": "100",
     }.items():

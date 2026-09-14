@@ -67,7 +67,10 @@ class Settings(BaseSettings):
 
     max_per_order_inr: float = 1000.0
     daily_cap_inr: float = 1500.0
-    monthly_cap_inr: float = 20000.0
+    # UPI Circle caps full delegation to a secondary user -- the slot an agent occupies
+    # under NPCI's Unified Agent Protocol -- at Rs 15,000/month. Defaulting above what
+    # the rail permits just moves the refusal from a clear message to a decline.
+    monthly_cap_inr: float = 15000.0
     # Orders above this need a human. Set equal to max_per_order_inr to never escalate.
     human_approval_above_inr: float = 800.0
     # Restaurants below this rating are never considered. Applied as a search filter and

@@ -29,11 +29,15 @@ from app.config import get_settings
 from app.core.planner import get_pool
 from app.deps import (
     DEFAULT_USER,
+    activate_mandate,
     approve_run,
     build_rail,
     execute_run,
+    mandate_status,
     reject_run,
+    revoke_mandate,
     set_sessions,
+    setup_mandate,
     zomato_auth,
 )
 from app.integrations.calendar_mcp import ScheduleReader
@@ -425,6 +429,7 @@ async def dashboard_state(user: str = Depends(current_user)) -> dict[str, Any]:
             "typical_spend_rupees": profile.typical_spend_paise / 100.0,
         },
         "zomato": zomato_auth(s).status(user).to_dict(),
+        "payments": mandate_status(s, user_id=user),
         "pending_approvals": [r.to_dict() for r in rt.runs.pending_approvals()],
         "recent_runs": [r.to_dict() for r in rt.runs.list(limit=15)],
         "llm": pool.health() if pool else {"key_count": 0, "models": [], "available_keys": 0},
@@ -576,6 +581,52 @@ async def zomato_unlink(user: str = Depends(current_user)) -> dict[str, bool]:
     return {"ok": True}
 
 
+# --- autonomous payment ---------------------------------------------------------
+
+class MandateRequest(BaseModel):
+    max_amount_inr: float | None = Field(default=None, gt=0, le=100000)
+    contact: str = Field(default="", max_length=20)
+    name: str = Field(default="", max_length=80)
+
+
+@app.get("/api/payments", tags=["money"])
+async def payments_status(user: str = Depends(current_user)) -> dict[str, Any]:
+    return mandate_status(get_settings(), user_id=user)
+
+
+@app.post("/api/payments/mandate", tags=["money"], dependencies=[Depends(require_csrf)])
+async def create_mandate(
+    body: MandateRequest, user: str = Depends(current_user)
+) -> dict[str, Any]:
+    """Authorise the agent to pay on its own, up to a ceiling, until revoked."""
+    result = await setup_mandate(
+        get_settings(), user_id=user, max_amount_inr=body.max_amount_inr,
+        contact=body.contact, name=body.name,
+    )
+    if not result.get("ok"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, result.get("error", "failed"))
+    return result
+
+
+@app.post("/api/payments/mandate/activate", tags=["money"],
+          dependencies=[Depends(require_csrf)])
+async def confirm_mandate(user: str = Depends(current_user)) -> dict[str, Any]:
+    """Test-mode confirmation. In production the provider webhook does this."""
+    result = activate_mandate(get_settings(), user_id=user)
+    if not result.get("ok"):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, result.get("error", "not found"))
+    return result
+
+
+@app.post("/api/payments/mandate/revoke", tags=["money"],
+          dependencies=[Depends(require_csrf)])
+async def drop_mandate(user: str = Depends(current_user)) -> dict[str, Any]:
+    result = revoke_mandate(get_settings(), user_id=user)
+    if not result.get("ok"):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, result.get("error", "not found"))
+    return result
+
+
 @app.get("/api/security", tags=["ops"])
 async def security_state(user: str = Depends(current_user)) -> dict[str, Any]:
     """Injection attempts seen, and the health of the LLM pool behind the planner."""
@@ -631,7 +682,17 @@ async def razorpay_webhook(
     if not rail.verify_webhook(raw, x_razorpay_signature or ""):
         log.warning("razorpay webhook signature rejected")
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid signature")
-    log.info("razorpay webhook accepted", extra={"bytes": len(raw)})
+    # A mandate becomes usable when Razorpay confirms the user authorised it. Until
+    # then the agent must not debit, so this webhook is the real activation path.
+    import json as _json
+
+    try:
+        event = _json.loads(raw or b"{}").get("event", "")
+    except (ValueError, AttributeError):
+        event = ""
+    if event in ("subscription.authenticated", "token.confirmed", "order.paid"):
+        activate_mandate(get_settings())
+    log.info("razorpay webhook accepted", extra={"bytes": len(raw), "event": event})
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

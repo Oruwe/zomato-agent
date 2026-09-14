@@ -532,6 +532,116 @@ function renderWallet(s) {
   ].map(([k, v]) => `<dt>${esc(k)}</dt><dd class="num">${esc(v)}</dd>`).join('');
 }
 
+/* ---------- render: autonomous payment ---------- */
+
+const MANDATE_LABEL = {
+  active: ['on', 'active'],
+  pending: ['off', 'waiting for your approval'],
+  exhausted: ['off', 'ceiling reached'],
+  revoked: ['off', 'revoked'],
+  failed: ['off', 'failed'],
+};
+
+function renderMandate(p) {
+  const host = $('#mandateHost');
+  if (!p) { host.innerHTML = ''; return; }
+
+  // Cash on delivery moves no money at order time, so there is nothing to authorise.
+  if (!p.needs_mandate) {
+    host.innerHTML = `
+      <div class="guard">
+        <span class="grow"><span class="name">Settlement</span></span>
+        <span class="state on">cash on delivery</span>
+      </div>
+      <p class="sub" style="margin:12px 0 0">
+        The agent orders on its own and you pay the rider. No standing authorisation is
+        needed because no money moves when the order is placed.
+      </p>`;
+    return;
+  }
+
+  const m = p.mandate;
+  if (!m || m.status === 'revoked') {
+    host.innerHTML = `
+      <div class="inputrow">
+        <input id="mandateAmount" inputmode="decimal" placeholder="Ceiling, e.g. 5000"
+               value="5000" maxlength="7">
+        <button class="btn sm" id="authoriseBtn">Authorise</button>
+      </div>
+      <p class="sub" style="margin:12px 0 0">
+        Capped at ₹${esc(p.upi_circle_cap_rupees)} — the UPI Circle delegation limit for
+        an agent. Until you authorise, the agent will ask before every payment.
+      </p>`;
+    $('#authoriseBtn').addEventListener('click', async (ev) => {
+      ev.target.disabled = true;
+      try {
+        const amount = Number($('#mandateAmount').value) || undefined;
+        const res = await api('/api/payments/mandate', {
+          method: 'POST', body: JSON.stringify({ max_amount_inr: amount }),
+        });
+        toast(res.requires_approval
+          ? 'Approve the request in your UPI app to finish.'
+          : 'Authorised — the agent can now pay on its own.');
+        await refresh();
+      } catch (err) { toast(err.message, true); ev.target.disabled = false; }
+    });
+    return;
+  }
+
+  const [cls, label] = MANDATE_LABEL[m.status] || ['off', m.status];
+  const used = m.max_amount_rupees ? (m.debited_rupees / m.max_amount_rupees) * 100 : 0;
+  // Computed here rather than inline: the XSS audit keeps template holes to escaped or
+  // trivially-numeric expressions, and that strictness is worth more than terseness.
+  const pct = Math.min(100, used).toFixed(1);
+  const fillClass = used >= 90 ? 'danger' : used >= 70 ? 'warn' : '';
+  host.innerHTML = `
+    <div class="guard">
+      <span class="grow"><span class="name">Authorisation</span></span>
+      <span class="state ${cls}">${esc(label)}</span>
+    </div>
+    ${m.test_mode ? `<div class="guard">
+      <span class="grow"><span class="name">Mode</span></span>
+      <span class="state off">test — no real money moves</span>
+    </div>` : ''}
+    <div class="meter" style="margin-top:14px">
+      <div class="row">
+        <span class="label">Debited against this authorisation</span>
+        <span class="val money">${rupeesShort(m.debited_rupees)} <span style="color:var(--faint);font-weight:500">of ${rupeesShort(m.max_amount_rupees)}</span></span>
+      </div>
+      <div class="track"><div class="fill ${esc(fillClass)}" style="width:${esc(pct)}%"></div></div>
+    </div>
+    <dl class="kv" style="margin-top:14px">
+      <dt>Autonomous payments made</dt><dd class="num">${esc(m.debits)}</dd>
+      <dt>Headroom left</dt><dd class="money">${rupees(m.remaining_rupees)}</dd>
+    </dl>
+    ${m.last_error ? `<div class="threat" style="margin-top:12px"><div class="src">Last failure</div><div style="font-size:13px;margin-top:4px">${esc(m.last_error)}</div></div>` : ''}
+    <p class="sub" style="margin:14px 0 0">
+      This authorisation covers the agent's own spend ledger. Zomato is the merchant and
+      collects payment itself, so this does not settle the restaurant bill directly.
+    </p>
+    <div style="margin-top:12px;display:flex;gap:9px;flex-wrap:wrap">
+      ${m.status === 'pending' ? '<button class="btn sm" id="confirmMandate">I approved it — confirm</button>' : ''}
+      <button class="btn danger sm" id="revokeMandate">Revoke</button>
+    </div>`;
+
+  const confirm = $('#confirmMandate');
+  if (confirm) {
+    confirm.addEventListener('click', async () => {
+      confirm.disabled = true;
+      try {
+        await api('/api/payments/mandate/activate', { method: 'POST', body: '{}' });
+        toast('Authorisation confirmed.');
+        await refresh();
+      } catch (err) { toast(err.message, true); confirm.disabled = false; }
+    });
+  }
+  $('#revokeMandate').addEventListener('click', async () => {
+    await api('/api/payments/mandate/revoke', { method: 'POST', body: '{}' });
+    toast('Revoked. The agent will ask before paying again.');
+    await refresh();
+  });
+}
+
 /* ---------- render: security ---------- */
 
 function renderSecurity(s, sec) {
@@ -759,6 +869,7 @@ async function refresh() {
   renderApprovals(state);
   renderOrders(state);
   renderWallet(state);
+  renderMandate(state.payments);
   renderSecurity(state, security);
   renderTaste(state);
 

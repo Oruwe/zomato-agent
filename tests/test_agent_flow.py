@@ -18,6 +18,7 @@ def _settings(tmp_path, **over) -> Settings:
         use_mocks=True,
         dry_run=True,
         allow_autonomous_checkout=False,
+        zomato_settlement_type="cash_on_delivery",
         payment_rail="mock",
         gemini_api_key="",
         memory_path=str(tmp_path / "memory"),
