@@ -167,6 +167,58 @@ async def test_merchant_markup_is_not_executed(page) -> None:
     assert page.errors == [], f"console errors on the security view: {page.errors}"
 
 
+async def test_ordering_is_gated_on_a_linked_zomato_account(page) -> None:
+    """Orders go to the user's own account, so nothing can be ordered before linking."""
+    if await page.locator("#phoneInput").count() == 0:
+        pytest.skip("account already linked by an earlier test in this module")
+    assert await page.locator("#orderBtn").is_disabled()
+    assert await page.locator("#zomatoHost").inner_text()
+
+
+async def test_account_can_be_linked_by_phone_and_otp(page) -> None:
+    if await page.locator("#phoneInput").count() == 0:
+        pytest.skip("account already linked by an earlier test in this module")
+    await page.fill("#phoneInput", "9876543210")
+    await page.click("#sendOtp")
+    await page.wait_for_timeout(500)
+    assert await page.locator("#otpInput").is_visible()
+
+    # A wrong code must produce a readable message, not a stack trace.
+    await page.fill("#otpInput", "000000")
+    await page.click("#verifyOtp")
+    await page.wait_for_timeout(500)
+    assert "Incorrect" in await page.locator("#loginMsg").inner_text()
+
+    await page.fill("#otpInput", "123456")
+    await page.click("#verifyOtp")
+    await page.wait_for_timeout(2000)
+    assert await page.locator("#orderBtn").is_enabled(), "linking did not unlock ordering"
+
+
+async def _ensure_linked(page) -> None:
+    """Link the account if it is not already. The server is shared across this module,
+    so a previous test may have linked it; the helper has to be idempotent."""
+    if await page.locator("#phoneInput").count() == 0:
+        return
+    await page.fill("#phoneInput", "9876543210")
+    await page.click("#sendOtp")
+    await page.wait_for_timeout(400)
+    await page.fill("#otpInput", "123456")
+    await page.click("#verifyOtp")
+    await page.wait_for_timeout(2000)
+
+
+async def test_linked_account_shows_a_masked_number_and_address(page) -> None:
+    await _ensure_linked(page)
+
+    await page.click('nav.tabs button[data-view="taste"]')
+    await page.wait_for_timeout(400)
+    panel = await page.locator("#accountHost").inner_text()
+    assert "••••" in panel, "the full phone number should never be rendered"
+    assert "9876543210" not in panel
+    assert "Deliver to" in panel or "DELIVER TO" in panel.upper()
+
+
 async def test_wallet_shows_spend_against_the_cap(page) -> None:
     await page.click('nav.tabs button[data-view="wallet"]')
     await page.wait_for_timeout(300)

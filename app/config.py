@@ -70,6 +70,9 @@ class Settings(BaseSettings):
     monthly_cap_inr: float = 20000.0
     # Orders above this need a human. Set equal to max_per_order_inr to never escalate.
     human_approval_above_inr: float = 800.0
+    # Restaurants below this rating are never considered. Applied as a search filter and
+    # re-checked locally, since a search backend is free to ignore the filter.
+    min_restaurant_rating: float = 3.8
 
     razorpay_key_id: str = ""
     razorpay_key_secret: SecretStr = SecretStr("")

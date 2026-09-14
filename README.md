@@ -34,7 +34,7 @@ Also available from the terminal:
 python -m app.cli run --slot breakfast   # watch it route around an injected merchant
 python -m app.cli memory                 # what it has learned about you
 python -m app.cli bench                  # control-plane latency profile
-pytest -q                                # 170 tests, incl. µs latency budgets
+pytest -q                                # 203 tests, incl. µs latency budgets
 pytest -q -m "not ui"                    # skip the browser tests (no Chromium needed)
 python -m evals.eval_runner              # red-team corpus + golden workflows
 ```
@@ -113,6 +113,57 @@ obfuscation, exfiltration, and UPI payment-redirect attempts. Benign cases are s
 > penalises it in scoring, and orders from a different restaurant.
 
 ---
+
+## Which payment gateway does the agent use?
+
+**None — and that is the single most important thing to understand about this product.**
+
+Zomato is the merchant of record. Its MCP `checkout_cart` accepts exactly two values,
+verified against the live schema:
+
+```python
+payment_method_type: enum ["upi", "cash_on_delivery"]
+```
+
+That leaves three real options, and only one is genuinely hands-free:
+
+| Option | Who takes the money | Agent autonomy |
+|---|---|---|
+| `cash_on_delivery` | The user, at the door | **Zero-touch.** The only fully autonomous path today |
+| `upi` | Zomato sends a collect request to the user's UPI app | **One tap.** NPCI *requires* that authentication; no agent can bypass it |
+| Become the merchant | You charge the user, then you pay Zomato | Zero-touch, but you are a payments intermediary and need an RBI Payment Aggregator licence |
+
+Razorpay and the `PaymentRail` abstraction in this repo **cannot pay the Zomato bill**.
+They are the agent's own pre-authorisation ledger: evidence the user consented to
+autonomous spend up to a cap, and a record of what was actually spent. A UPI Autopay
+mandate debits to *your* merchant account, not to Zomato's.
+
+The practical recommendation: `cash_on_delivery` for a fully autonomous demo, `upi` for
+real orders. The one-tap UPI approval is arguably a feature — it is the moment a person
+confirms that software spent their money.
+
+## Connecting a Zomato account
+
+Zomato authenticates **per MCP session**, not per request, so each user gets their own
+session — otherwise everyone's food would go to whoever logged in last.
+
+The flow is phone number → OTP → pick a saved address, exposed at `/api/zomato/*` and as
+a "Connect your Zomato account" card in the dashboard. Until an account is linked *and*
+has a delivery address, the Order button is disabled: there is nowhere to send food and
+no account to charge.
+
+Security properties, covered by `tests/test_zomato_auth.py`:
+
+- The auth packet Zomato returns carries the user's uuid, email and phone. It never
+  leaves the server; the browser sees only an opaque handle and a masked number
+  (`98••••10`).
+- OTP attempts are capped — a six-digit code is guessable.
+- Abandoned logins expire, and a handle from another browser tab is refused.
+- One user's linked session can never place orders for another.
+
+Restaurant choice respects `MIN_RESTAURANT_RATING` as a hard floor, applied both as a
+search filter and re-checked locally, because a search backend is free to ignore the
+filter and a rating floor the user set is a requirement rather than a hint.
 
 ## Money
 
@@ -251,12 +302,12 @@ do not count — they produce no food. A run awaiting approval does. `force=true
 
 ## Going live against real accounts
 
-**Blocking prerequisite:** your Zomato account currently has **no saved addresses**, and
-every search, menu and cart call requires an `address_id`. Bind a phone number and save a
-delivery address in the Zomato app first, or `USE_MOCKS=false` fails immediately with a
-clear error.
+Set `USE_MOCKS=false`, `ZOMATO_MCP_URL`, `ZOMATO_MCP_TOKEN`, and `APP_PASSWORD` +
+`SESSION_SECRET`. Then link an account from the dashboard: phone → OTP → address.
 
-Then set `USE_MOCKS=false`, `ZOMATO_MCP_TOKEN`, and `APP_PASSWORD` + `SESSION_SECRET`.
+**Prerequisite:** the Zomato account being linked must have at least one saved delivery
+address. Every search, menu and cart call requires an `address_id`. The dashboard detects
+this and asks the user to add one in the Zomato app rather than failing obscurely.
 
 Live MCP sessions are opened automatically at startup when `USE_MOCKS=false`
 (`app/integrations/mcp_client.py`): one long-lived Streamable HTTP session per server,
@@ -332,6 +383,7 @@ app/
     mock_rail.py         deterministic offline rail
   integrations/
     mcp_client.py        live MCP sessions: pooling, reconnect, error surfacing
+    zomato_auth.py       per-user account linking: phone -> OTP -> saved address
     zomato_mcp.py        search/menu/cart/checkout, TTL cache, ingress sanitisation
     calendar_mcp.py      schedule reader and meal-gap interval arithmetic
     mocks/fixtures.py    offline catalogue — two fixtures carry live injection payloads
@@ -344,7 +396,7 @@ evals/
   test_injections.json   26-case corpus, malicious and benign
   test_scenarios.json    golden end-to-end workflows
   bench_hotpath.py       control-plane microbenchmark
-tests/                   170 tests: security, flow, API, concurrency, live MCP,
+tests/                   203 tests: security, flow, API, concurrency, live MCP,
                          LLM pool, planner, latency budgets, journal resilience,
                          deployment config, and browser end-to-end
 ```

@@ -11,12 +11,14 @@ takes the per-user lock before touching the wallet and persists the result. Call
 from __future__ import annotations
 
 from datetime import date, datetime
+from pathlib import Path
 
 from app.config import Settings, get_settings
 from app.core.agent import AgentDeps, FoodOrderingAgent
 from app.core.runs import ApprovalDecision
 from app.core.state import AgentRun
 from app.integrations.calendar_mcp import ScheduleReader
+from app.integrations.zomato_auth import ZomatoAuth
 from app.integrations.zomato_mcp import ZomatoClient
 from app.observability.logger import get_logger
 from app.payments.base import Money, PaymentError, PaymentIntent
@@ -28,7 +30,7 @@ log = get_logger(__name__)
 
 __all__ = [
     "build_agent", "build_rail", "execute_run", "approve_run", "reject_run",
-    "set_sessions", "get_sessions", "DEFAULT_USER",
+    "set_sessions", "get_sessions", "zomato_auth", "reset_zomato_auth", "DEFAULT_USER",
 ]
 
 DEFAULT_USER = "default"
@@ -51,6 +53,41 @@ def set_sessions(zomato: object | None = None, calendar: object | None = None) -
 
 def get_sessions() -> tuple[object | None, object | None]:
     return _SESSIONS["zomato"], _SESSIONS["calendar"]
+
+
+# Zomato authenticates per MCP session, so each user needs their own. One manager holds
+# them all; it is keyed on settings so tests with separate stores stay isolated.
+_AUTH: dict[tuple, ZomatoAuth] = {}
+
+
+async def _new_zomato_session(_user_id: str):
+    """Open a fresh MCP session for one user to authenticate against."""
+    from app.integrations.mcp_client import AuthedHTTPTransport, MCPConnection
+
+    s = get_settings()
+    transport = AuthedHTTPTransport(
+        s.zomato_mcp_url,
+        token=s.zomato_mcp_token.get_secret_value(),
+        timeout_s=s.mcp_timeout_s,
+    )
+    conn = MCPConnection("zomato", transport, call_timeout_s=s.mcp_timeout_s)
+    await conn.connect()
+    return conn
+
+
+def zomato_auth(settings: Settings | None = None) -> ZomatoAuth:
+    s = settings or get_settings()
+    key = (s.use_mocks, s.zomato_mcp_url, str(Path(s.memory_path).resolve()))
+    auth = _AUTH.get(key)
+    if auth is None:
+        auth = ZomatoAuth(s, session_factory=_new_zomato_session)
+        _AUTH[key] = auth
+    return auth
+
+
+def reset_zomato_auth() -> None:
+    """Test helper -- drops every linked account."""
+    _AUTH.clear()
 
 
 def build_rail(settings: Settings):
@@ -97,10 +134,17 @@ def build_agent(
     s = settings or get_settings()
     rt: UserRuntime = runtime_for(s, user_id)
     live_zomato, live_calendar = get_sessions()
+    account = zomato_auth(s).status(user_id)
+    # A linked account's own session takes precedence: orders must go to the person who
+    # logged in, using the address they chose, not to a shared service account.
+    user_session = zomato_auth(s).session_for(user_id)
     return FoodOrderingAgent(
         AgentDeps(
             settings=s,
-            zomato=ZomatoClient(s, mcp_session=zomato_session or live_zomato),
+            zomato=ZomatoClient(
+                s, mcp_session=zomato_session or user_session or live_zomato
+            ),
+            address_id=account.default_address_id,
             schedule=ScheduleReader(s, mcp_session=calendar_session or live_calendar),
             wallet=rt.wallet,
             policy=rt.policy,

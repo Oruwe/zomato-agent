@@ -49,6 +49,9 @@ class AgentDeps:
     rail: object | None = None
     # Run history, consulted to avoid ordering the same meal twice.
     runs: object | None = None
+    # The address the user picked in the dashboard. None falls back to their Zomato
+    # default, which is what a single-address account will have anyway.
+    address_id: str | None = None
 
 
 class FoodOrderingAgent:
@@ -111,7 +114,7 @@ class FoodOrderingAgent:
     # -- steps ------------------------------------------------------------------
     async def _step_address(self, run: AgentRun) -> str:
         t = now_ns()
-        address_id = await self.d.zomato.default_address_id()
+        address_id = self.d.address_id or await self.d.zomato.default_address_id()
         run.record("resolve_address", True, {"address_id": address_id},
                    (now_ns() - t) / 1000.0)
         return address_id
@@ -211,10 +214,14 @@ class FoodOrderingAgent:
         if profile.top_cuisines:
             keyword = f"{profile.top_cuisines[0][0]} {gap.keyword}"
 
+        min_rating = self.d.settings.min_restaurant_rating
         restaurants = await self.d.zomato.search_restaurants(
             address_id=address_id, keyword=keyword,
-            max_price=budget_paise / 100.0, page_size=6,
+            max_price=budget_paise / 100.0, min_rating=min_rating, page_size=8,
         )
+        # Re-check locally: the search backend is free to ignore the filter, and a rating
+        # floor the user set is a requirement, not a hint.
+        restaurants = [r for r in restaurants if r.rating >= min_rating]
         for r in restaurants:
             if r.risk_score:
                 run.flag_injection(f"zomato:{r.res_id}", r.risk_reasons, r.risk_score)

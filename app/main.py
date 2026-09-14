@@ -34,8 +34,10 @@ from app.deps import (
     execute_run,
     reject_run,
     set_sessions,
+    zomato_auth,
 )
 from app.integrations.calendar_mcp import ScheduleReader
+from app.integrations.zomato_auth import LoginError
 from app.observability.latency import REGISTRY
 from app.observability.logger import configure_logging, get_logger, new_trace_id
 from app.runtime import runtime_for
@@ -267,6 +269,22 @@ class DecisionRequest(BaseModel):
     reason: str = Field(default="", max_length=500)
 
 
+class PhoneRequest(BaseModel):
+    # Deliberately permissive: `normalise_phone` owns the rules and returns a message a
+    # person can act on. A Pydantic length constraint here would short-circuit that into
+    # an unhelpful 422 validation blob.
+    phone: str = Field(min_length=1, max_length=20)
+
+
+class OtpRequest(BaseModel):
+    handle: str = Field(min_length=8, max_length=64)
+    code: str = Field(min_length=4, max_length=8)
+
+
+class AddressRequest(BaseModel):
+    address_id: str = Field(min_length=1, max_length=128)
+
+
 class PreferenceRequest(BaseModel):
     likes: list[str] = Field(default_factory=list, max_length=50)
     dislikes: list[str] = Field(default_factory=list, max_length=50)
@@ -364,6 +382,7 @@ async def dashboard_state(user: str = Depends(current_user)) -> dict[str, Any]:
             "allow_autonomous_checkout": s.allow_autonomous_checkout,
             "planner": "gemini" if pool else "deterministic",
             "environment": s.environment,
+            "min_restaurant_rating": s.min_restaurant_rating,
         },
         "wallet": {
             **wallet,
@@ -405,6 +424,7 @@ async def dashboard_state(user: str = Depends(current_user)) -> dict[str, Any]:
             "order_count": profile.order_count,
             "typical_spend_rupees": profile.typical_spend_paise / 100.0,
         },
+        "zomato": zomato_auth(s).status(user).to_dict(),
         "pending_approvals": [r.to_dict() for r in rt.runs.pending_approvals()],
         "recent_runs": [r.to_dict() for r in rt.runs.list(limit=15)],
         "llm": pool.health() if pool else {"key_count": 0, "models": [], "available_keys": 0},
@@ -501,6 +521,59 @@ async def state_preference(
         dietary=[x[:60] for x in body.dietary],
     )
     return {"ok": True, "blocked_ingredients": sorted(rt.memory.blocked_ingredients())}
+
+
+# --- Zomato account linking -----------------------------------------------------
+
+@app.get("/api/zomato", tags=["zomato"])
+async def zomato_status(user: str = Depends(current_user)) -> dict[str, Any]:
+    return zomato_auth(get_settings()).status(user).to_dict()
+
+
+@app.post("/api/zomato/login", tags=["zomato"], dependencies=[Depends(require_csrf)])
+async def zomato_login(body: PhoneRequest, user: str = Depends(current_user)) -> dict[str, Any]:
+    """Send an OTP to the user's Zomato phone number."""
+    try:
+        handle = await zomato_auth(get_settings()).start_login(user, body.phone)
+    except LoginError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    # The handle is opaque; the auth packet it stands for never leaves the server.
+    return {"ok": True, "handle": handle}
+
+
+@app.post("/api/zomato/verify", tags=["zomato"], dependencies=[Depends(require_csrf)])
+async def zomato_verify(body: OtpRequest, user: str = Depends(current_user)) -> dict[str, Any]:
+    try:
+        account = await zomato_auth(get_settings()).verify_login(user, body.handle, body.code)
+    except LoginError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    return {"ok": True, "account": account.to_dict()}
+
+
+@app.post("/api/zomato/address", tags=["zomato"], dependencies=[Depends(require_csrf)])
+async def zomato_select_address(
+    body: AddressRequest, user: str = Depends(current_user)
+) -> dict[str, Any]:
+    try:
+        account = zomato_auth(get_settings()).select_address(user, body.address_id)
+    except LoginError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    return {"ok": True, "account": account.to_dict()}
+
+
+@app.post("/api/zomato/refresh", tags=["zomato"], dependencies=[Depends(require_csrf)])
+async def zomato_refresh(user: str = Depends(current_user)) -> dict[str, Any]:
+    try:
+        account = await zomato_auth(get_settings()).refresh_addresses(user)
+    except LoginError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    return {"ok": True, "account": account.to_dict()}
+
+
+@app.post("/api/zomato/unlink", tags=["zomato"], dependencies=[Depends(require_csrf)])
+async def zomato_unlink(user: str = Depends(current_user)) -> dict[str, bool]:
+    await zomato_auth(get_settings()).unlink(user)
+    return {"ok": True}
 
 
 @app.get("/api/security", tags=["ops"])

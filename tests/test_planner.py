@@ -274,3 +274,43 @@ def test_slot_aware_recall_separates_meals(tmp_path) -> None:
         "dinner preferences were swamped by breakfast history"
     )
     assert breakfast["breakfast"] == pytest.approx(1.0)
+
+
+# --- catalogue search -----------------------------------------------------------
+
+async def test_unmatched_keyword_falls_back_to_recommendations() -> None:
+    """A keyword that matches nothing must not read as "there is no food near you".
+
+    The fallback was dead code once: zero-scoring rows were filtered out before it ran,
+    so an unmatched keyword returned an empty list and the agent reported that no
+    restaurant matched the slot.
+    """
+    from app.config import Settings
+    from app.integrations.zomato_mcp import ZomatoClient
+
+    z = ZomatoClient(Settings(use_mocks=True, memory_path=str(_SCRATCH)))
+    out = await z.search_restaurants(address_id="a", keyword="xyzzy nothing", page_size=5)
+    assert out, "an unmatched keyword returned nothing"
+    # Fallback is ordered by rating, so the best-rated option leads.
+    assert out[0].rating == max(r.rating for r in out)
+
+
+async def test_keyword_matches_across_plurals() -> None:
+    """The snack slot searches "rolls"; the fixture tags it "roll"."""
+    from app.config import Settings
+    from app.integrations.zomato_mcp import ZomatoClient
+
+    z = ZomatoClient(Settings(use_mocks=True, memory_path=str(_SCRATCH)))
+    out = await z.search_restaurants(address_id="a", keyword="snacks coffee rolls",
+                                     page_size=5)
+    assert "Leon Grill" in [r.name for r in out]
+
+
+async def test_rating_filter_is_applied() -> None:
+    from app.config import Settings
+    from app.integrations.zomato_mcp import ZomatoClient
+
+    z = ZomatoClient(Settings(use_mocks=True, memory_path=str(_SCRATCH)))
+    out = await z.search_restaurants(address_id="a", keyword="", min_rating=4.5,
+                                     page_size=10)
+    assert out and all(r.rating >= 4.5 for r in out)

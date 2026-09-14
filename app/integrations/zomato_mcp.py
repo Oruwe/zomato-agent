@@ -306,9 +306,12 @@ class ZomatoClient:
             hay = " ".join(
                 [r["name"].lower(), " ".join(r["cuisines"]).lower(), " ".join(r["tags"]).lower()]
             )
-            score = sum(1 for t in terms if t in hay)
-            if score or not terms:
-                scored.append((score, r))
+            # Substring both ways so "rolls" matches a "roll" tag and vice versa.
+            score = sum(1 for t in terms if t in hay or any(t in w or w in t for w in hay.split()))
+            # Keep zero-scoring rows too: the fallback below needs something to fall back
+            # to. Filtering them out here made that fallback dead code, so a keyword that
+            # matched nothing returned an empty list and read as "no food near you".
+            scored.append((score, r))
         scored.sort(key=lambda p: (-p[0], -p[1]["rating"]))
         matched = [r for score, r in scored if score]
         if matched:

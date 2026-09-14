@@ -260,6 +260,161 @@ function describeEscalation(reason) {
   return raw;
 }
 
+/* ---------- render: Zomato account ---------- */
+
+let loginHandle = null;
+
+/* Orders go to the user's own Zomato account, so nothing can be ordered until it is
+ * linked. This card is the gate: phone -> OTP -> pick an address. */
+function renderZomato(z) {
+  const host = $('#zomatoHost');
+  const orderBtn = $('#orderBtn');
+
+  if (z && z.linked && z.default_address_id) {
+    host.innerHTML = '';
+    orderBtn.disabled = false;
+    orderBtn.title = '';
+    return;
+  }
+
+  // Ordering is impossible without a linked account and an address to deliver to.
+  orderBtn.disabled = true;
+  orderBtn.title = 'Link your Zomato account first';
+
+  if (z && z.linked) {
+    host.innerHTML = `
+      <div class="approval">
+        <h2 style="margin:0 0 2px;font-size:15px">Add a delivery address</h2>
+        <div class="why">${esc(z.error || 'Your Zomato account has no saved address. Add one in the Zomato app, then refresh.')}</div>
+        <div class="actions"><button class="btn sm" id="refreshAddr">I've added it — refresh</button></div>
+      </div>`;
+    $('#refreshAddr').addEventListener('click', async (ev) => {
+      ev.target.disabled = true;
+      try {
+        await api('/api/zomato/refresh', { method: 'POST', body: '{}' });
+        await refresh();
+      } catch (err) { toast(err.message, true); ev.target.disabled = false; }
+    });
+    return;
+  }
+
+  host.innerHTML = `
+    <div class="card" style="border-color:var(--accent)">
+      <h2>Connect your Zomato account</h2>
+      <p class="sub">The agent orders on your account, to your saved address. Zomato sends a one-time code to your registered number.</p>
+      <div id="loginStep"></div>
+    </div>`;
+  renderPhoneStep();
+}
+
+function renderPhoneStep() {
+  $('#loginStep').innerHTML = `
+    <div class="inputrow">
+      <input id="phoneInput" type="tel" inputmode="numeric" autocomplete="tel"
+             placeholder="10-digit mobile number" maxlength="14">
+      <button class="btn sm" id="sendOtp">Send code</button>
+    </div>
+    <div class="err" id="loginMsg" style="color:var(--danger);font-size:13px;margin-top:8px"></div>`;
+
+  const send = async () => {
+    const btn = $('#sendOtp');
+    btn.disabled = true;
+    $('#loginMsg').textContent = '';
+    try {
+      const res = await api('/api/zomato/login', {
+        method: 'POST', body: JSON.stringify({ phone: $('#phoneInput').value }),
+      });
+      loginHandle = res.handle;
+      renderOtpStep();
+    } catch (err) {
+      $('#loginMsg').textContent = err.message;
+      btn.disabled = false;
+    }
+  };
+  $('#sendOtp').addEventListener('click', send);
+  $('#phoneInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
+  $('#phoneInput').focus();
+}
+
+function renderOtpStep() {
+  $('#loginStep').innerHTML = `
+    <div class="inputrow">
+      <input id="otpInput" inputmode="numeric" autocomplete="one-time-code"
+             placeholder="6-digit code" maxlength="8">
+      <button class="btn sm" id="verifyOtp">Verify</button>
+    </div>
+    <div style="font-size:12.5px;color:var(--muted);margin-top:8px">
+      Sent to your Zomato number. <a href="#" id="restartLogin">Use a different number</a>
+    </div>
+    <div class="err" id="loginMsg" style="color:var(--danger);font-size:13px;margin-top:8px"></div>`;
+
+  const verify = async () => {
+    const btn = $('#verifyOtp');
+    btn.disabled = true;
+    $('#loginMsg').textContent = '';
+    try {
+      await api('/api/zomato/verify', {
+        method: 'POST',
+        body: JSON.stringify({ handle: loginHandle, code: $('#otpInput').value }),
+      });
+      toast('Zomato account connected.');
+      await refresh();
+    } catch (err) {
+      $('#loginMsg').textContent = err.message;
+      btn.disabled = false;
+    }
+  };
+  $('#verifyOtp').addEventListener('click', verify);
+  $('#otpInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') verify(); });
+  $('#restartLogin').addEventListener('click', (e) => { e.preventDefault(); renderPhoneStep(); });
+  $('#otpInput').focus();
+}
+
+function renderAccount(z, config) {
+  const host = $('#accountHost');
+  if (!z || !z.linked) {
+    host.innerHTML = '<div class="empty">Not connected. Link your account from the Today tab.</div>';
+    return;
+  }
+  const addresses = z.addresses || [];
+  host.innerHTML = `
+    <dl class="kv" style="margin-bottom:14px">
+      <dt>Signed in as</dt><dd>${esc(z.name || 'Zomato user')} · ${esc(z.phone_masked || '')}</dd>
+      <dt>Minimum rating</dt><dd class="num">${esc(config.min_restaurant_rating)} ★</dd>
+    </dl>
+    <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--faint);margin-bottom:8px">Deliver to</div>
+    ${addresses.length ? addresses.map((a) => `
+      <div class="guard">
+        <span class="grow">
+          <span class="name">${esc(a.alias || 'Saved address')}</span>
+          <div class="meta" style="font-size:12.5px;color:var(--muted)">${esc(a.address || '')}</div>
+        </span>
+        ${a.address_id === z.default_address_id
+          ? '<span class="state on">selected</span>'
+          : `<button class="btn ghost sm" data-addr="${esc(a.address_id)}">Use this</button>`}
+      </div>`).join('')
+      : '<div class="empty">No saved addresses on this Zomato account.</div>'}
+    <div style="margin-top:14px"><button class="btn danger sm" id="unlinkBtn">Disconnect account</button></div>`;
+
+  host.querySelectorAll('[data-addr]').forEach((b) =>
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      try {
+        await api('/api/zomato/address', {
+          method: 'POST', body: JSON.stringify({ address_id: b.dataset.addr }),
+        });
+        toast('Delivery address updated.');
+        await refresh();
+      } catch (err) { toast(err.message, true); b.disabled = false; }
+    }));
+
+  $('#unlinkBtn').addEventListener('click', async () => {
+    await api('/api/zomato/unlink', { method: 'POST', body: '{}' });
+    toast('Disconnected.');
+    await refresh();
+  });
+}
+
 /* ---------- render: approvals ---------- */
 
 function renderApprovals(s) {
@@ -598,6 +753,8 @@ async function refresh() {
   STATE = state;
 
   renderHeader(state);
+  renderZomato(state.zomato);
+  renderAccount(state.zomato, state.config);
   renderToday(state);
   renderApprovals(state);
   renderOrders(state);
