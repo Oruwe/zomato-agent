@@ -68,6 +68,18 @@ class PaymentOutcome:
     def settled(self) -> bool:
         return self.state in (OrderPaymentState.PAID, OrderPaymentState.ON_DELIVERY)
 
+    @property
+    def zero_touch(self) -> bool:
+        """True when money moved with no human step at all.
+
+        This is the metric that actually decides whether the product is autonomous, so it
+        is recorded rather than inferred later. A `upi` order can land here if the user's
+        Zomato Money balance covered the bill: the wallet is applied at checkout and no
+        collect request is raised. That path is untested against live Zomato -- see the
+        README -- so the flag exists partly to make it observable the first time it runs.
+        """
+        return self.state == OrderPaymentState.PAID and not self.action_url
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "order_id": self.order_id,
@@ -77,6 +89,7 @@ class PaymentOutcome:
             "message": self.message,
             "needs_user": self.needs_user,
             "settled": self.settled,
+            "zero_touch": self.zero_touch,
         }
 
 

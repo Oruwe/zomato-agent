@@ -20,7 +20,6 @@ from app.integrations.payment_status import (
     parse_tracking,
 )
 
-
 # --- cash on delivery ------------------------------------------------------------
 
 def test_cash_order_is_settled_without_a_payment_step() -> None:
@@ -129,3 +128,30 @@ def test_outcome_never_serialises_the_raw_payload() -> None:
                          payment_type="upi")
     assert "raw" not in out.to_dict()
     assert "secret" not in str(out.to_dict())
+
+
+# --- zero-touch detection --------------------------------------------------------
+
+def test_a_prepaid_upi_order_is_flagged_zero_touch() -> None:
+    """If Zomato Money covers the bill, no collect is raised and nobody taps anything.
+
+    Unverified against live Zomato, which is exactly why it is recorded as a flag rather
+    than assumed: the first real order will say whether it happens.
+    """
+    out = parse_checkout({"order_id": "o12", "status": "confirmed"}, payment_type="upi")
+    assert out.zero_touch is True
+
+
+def test_an_order_awaiting_approval_is_not_zero_touch() -> None:
+    out = parse_checkout(
+        {"order_id": "o13", "status": "confirmed", "payment_link": "https://x"},
+        payment_type="upi",
+    )
+    assert out.zero_touch is False
+
+
+def test_cash_on_delivery_is_not_zero_touch() -> None:
+    """Someone still hands over money; it just happens later."""
+    out = parse_checkout({"order_id": "o14", "status": "placed"},
+                         payment_type="cash_on_delivery")
+    assert out.settled and out.zero_touch is False
