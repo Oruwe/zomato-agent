@@ -33,4 +33,6 @@ sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"PORT\"
 # Single worker: the wallet ledger is in-process, so multiple workers would each hold
 # their own view of the spend envelope. Scale by raising caps, not replicas, until the
 # ledger is moved to shared storage.
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --workers 1 --log-config=/dev/null"]
+# No --log-config: uvicorn's CLI rejects an empty config file, and the lifespan's
+# configure_logging() already reassigns uvicorn's handlers to the JSON formatter.
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --workers 1"]
