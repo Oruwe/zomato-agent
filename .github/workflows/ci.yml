@@ -13,11 +13,62 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+
       - name: Install
         run: pip install -e ".[dev]"
+
       - name: Lint
         run: ruff check app evals tests
-      - name: Unit + latency budget tests
+
+      - name: Unit, API, concurrency and latency-budget tests
         run: pytest -q
+
       - name: Security and behavioural evals
         run: python -m evals.eval_runner
+
+  package:
+    # The dashboard is served from files inside the installed package, so a wheel that
+    # drops app/ui would 404 in production while every test still passed. Build the
+    # wheel, install it somewhere else entirely, and boot it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build wheel
+        run: pip install build && python -m build --wheel --outdir dist .
+
+      - name: Install the wheel in a clean environment
+        run: |
+          python -m venv /tmp/verify
+          /tmp/verify/bin/pip install dist/*.whl
+
+      - name: Boot it outside the source tree and smoke-test
+        working-directory: /tmp
+        env:
+          MEMORY_PATH: /tmp/ci-var
+        run: |
+          /tmp/verify/bin/python -m uvicorn app.main:app --port 10111 &
+          curl -sf --retry 30 --retry-delay 1 --retry-connrefused http://localhost:10111/healthz
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:10111/)" = 200
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:10111/static/app.js)" = 200
+          curl -sf -X POST http://localhost:10111/api/run \
+            -H 'Content-Type: application/json' \
+            -H 'X-Requested-With: zomato-agent' \
+            -d '{"slot":"lunch"}' | grep -q '"state"'
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t zomato-agent:ci .
+      - name: Boot the container and check health
+        run: |
+          docker run -d --name agent -p 10000:10000 zomato-agent:ci
+          curl -sf --retry 30 --retry-delay 1 --retry-connrefused http://localhost:10000/healthz
+          docker logs agent
+          docker rm -f agent

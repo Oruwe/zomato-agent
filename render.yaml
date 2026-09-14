@@ -75,7 +75,11 @@ services:
     name: tick-breakfast          # 08:30 IST
     runtime: docker
     schedule: "0 3 * * *"
-    dockerCommand: sh -c 'curl -fsS -X POST "$AGENT_URL/webhook/schedule-tick" -H "X-Agent-Secret: $WEBHOOK_SHARED_SECRET" -H "Content-Type: application/json" -d "{\"slot\":\"breakfast\"}"'
+    dockerCommand: >-
+      sh -c 'curl -fsS -X POST "$AGENT_URL/webhook/schedule-tick"
+      -H "X-Agent-Secret: $WEBHOOK_SHARED_SECRET"
+      -H "Content-Type: application/json"
+      -d "{\"slot\":\"breakfast\"}"'
     envVars:
       - key: AGENT_URL
         sync: false
@@ -86,7 +90,11 @@ services:
     name: tick-lunch              # 12:30 IST
     runtime: docker
     schedule: "0 7 * * *"
-    dockerCommand: sh -c 'curl -fsS -X POST "$AGENT_URL/webhook/schedule-tick" -H "X-Agent-Secret: $WEBHOOK_SHARED_SECRET" -H "Content-Type: application/json" -d "{\"slot\":\"lunch\"}"'
+    dockerCommand: >-
+      sh -c 'curl -fsS -X POST "$AGENT_URL/webhook/schedule-tick"
+      -H "X-Agent-Secret: $WEBHOOK_SHARED_SECRET"
+      -H "Content-Type: application/json"
+      -d "{\"slot\":\"lunch\"}"'
     envVars:
       - key: AGENT_URL
         sync: false
@@ -97,7 +105,11 @@ services:
     name: tick-dinner             # 20:00 IST
     runtime: docker
     schedule: "30 14 * * *"
-    dockerCommand: sh -c 'curl -fsS -X POST "$AGENT_URL/webhook/schedule-tick" -H "X-Agent-Secret: $WEBHOOK_SHARED_SECRET" -H "Content-Type: application/json" -d "{\"slot\":\"dinner\"}"'
+    dockerCommand: >-
+      sh -c 'curl -fsS -X POST "$AGENT_URL/webhook/schedule-tick"
+      -H "X-Agent-Secret: $WEBHOOK_SHARED_SECRET"
+      -H "Content-Type: application/json"
+      -d "{\"slot\":\"dinner\"}"'
     envVars:
       - key: AGENT_URL
         sync: false

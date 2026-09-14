@@ -237,9 +237,13 @@ class ZomatoClient:
                 "res_id": cart["res_id"],
                 "mock": True,
             }
-        return await self._call(
+        raw = await self._call(
             "checkout_cart", {"cart_id": cart_id, "payment_method_type": payment_method_type}
         )
+        # The live API wraps payloads in a `result` envelope; the mock returns them flat.
+        # Without unwrapping here a real order is placed but its id is lost, leaving the
+        # user charged for an order the system cannot track.
+        return _node(raw)
 
     # -- internals --------------------------------------------------------------
     async def _call(self, tool: str, args: dict) -> dict:
@@ -311,12 +315,17 @@ class ZomatoClient:
 
 # -- response unwrapping ---------------------------------------------------------
 def _unwrap(result: Any) -> dict:
-    """Normalise an MCP CallToolResult into a plain dict."""
+    """Normalise an MCP CallToolResult into a plain dict.
+
+    MCP 1.x exposes `structuredContent`; 2.x renamed it to `structured_content`. Both are
+    accepted, with the JSON text block as the fallback either way.
+    """
     if isinstance(result, dict):
         return result
-    content = getattr(result, "structuredContent", None)
-    if isinstance(content, dict):
-        return content
+    for attr in ("structured_content", "structuredContent"):
+        content = getattr(result, attr, None)
+        if isinstance(content, dict):
+            return content
     blocks = getattr(result, "content", None) or []
     for block in blocks:
         text = getattr(block, "text", None)
@@ -330,8 +339,14 @@ def _unwrap(result: Any) -> dict:
     return {}
 
 
+def _node(raw: dict) -> dict:
+    """Unwrap the `result` envelope the live MCP server wraps every payload in."""
+    inner = raw.get("result", raw)
+    return inner if isinstance(inner, dict) else raw
+
+
 def _extract_restaurants(raw: dict) -> list[dict]:
-    node = raw.get("result", raw)
+    node = _node(raw)
     for key in ("restaurants", "results", "data"):
         if isinstance(node.get(key), list):
             return node[key]
@@ -339,7 +354,7 @@ def _extract_restaurants(raw: dict) -> list[dict]:
 
 
 def _extract_categories(raw: dict) -> list[str]:
-    node = raw.get("result", raw)
+    node = _node(raw)
     cats = node.get("categories")
     if isinstance(cats, list):
         return [str(c) for c in cats]
@@ -350,13 +365,13 @@ def _extract_categories(raw: dict) -> list[str]:
 
 
 def _extract_menu(raw: dict) -> dict[str, list[dict]]:
-    node = raw.get("result", raw)
+    node = _node(raw)
     menu = node.get("menu") or node.get("categories") or {}
     return menu if isinstance(menu, dict) else {}
 
 
 def _extract_cart(raw: dict) -> tuple[str, int]:
-    node = raw.get("result", raw)
+    node = _node(raw)
     cart = node.get("cart", node)
     cart_id = str(cart.get("cart_id") or cart.get("id") or "")
     # Always trust the backend total -- offers and taxes are applied server-side.

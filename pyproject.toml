@@ -11,7 +11,7 @@ dependencies = [
     "pydantic>=2.7,<3",
     "pydantic-settings>=2.3,<3",
     "httpx>=0.27",
-    "mcp>=1.9,<3",
+    "mcp>=2.0,<3",   # 2.x API: mcp.Client, snake_case result fields
     "python-dateutil>=2.9",
 ]
 
@@ -25,6 +25,7 @@ dev = [
     "pytest-asyncio>=0.23",
     "respx>=0.21",
     "ruff>=0.5",
+    "pyyaml>=6.0",       # deployment-config tests parse render.yaml and the CI workflow
 ]
 
 [project.scripts]

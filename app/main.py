@@ -27,7 +27,14 @@ from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.core.planner import get_pool
-from app.deps import DEFAULT_USER, approve_run, build_rail, execute_run, reject_run
+from app.deps import (
+    DEFAULT_USER,
+    approve_run,
+    build_rail,
+    execute_run,
+    reject_run,
+    set_sessions,
+)
 from app.integrations.calendar_mcp import ScheduleReader
 from app.observability.latency import REGISTRY
 from app.observability.logger import configure_logging, get_logger, new_trace_id
@@ -64,7 +71,29 @@ async def lifespan(app: FastAPI):
     )
     if s.live_money_enabled:
         log.warning("LIVE MONEY ENABLED -- real orders will be placed and paid for")
+
+    # Live MCP sessions are opened once and reused. A failure here is logged, not fatal:
+    # the dashboard must still come up so the operator can see *why* it is broken.
+    zomato_session = calendar_session = None
+    if not s.use_mocks:
+        from app.integrations.mcp_client import open_sessions
+
+        zomato_session, calendar_session = await open_sessions(s)
+        set_sessions(zomato_session, calendar_session)
+        log.info(
+            "mcp sessions initialised",
+            extra={
+                "zomato": bool(zomato_session and zomato_session.connected),
+                "calendar": bool(calendar_session and calendar_session.connected),
+            },
+        )
+
     yield
+
+    for session in (zomato_session, calendar_session):
+        if session is not None:
+            await session.aclose()
+    set_sessions(None, None)
     log.info("service stopping")
 
 

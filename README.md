@@ -34,7 +34,7 @@ Also available from the terminal:
 python -m app.cli run --slot breakfast   # watch it route around an injected merchant
 python -m app.cli memory                 # what it has learned about you
 python -m app.cli bench                  # control-plane latency profile
-pytest -q                                # 99 tests, incl. µs latency budgets
+pytest -q                                # 117 tests, incl. µs latency budgets
 python -m evals.eval_runner              # red-team corpus + golden workflows
 ```
 
@@ -220,9 +220,23 @@ clear error.
 
 Then set `USE_MOCKS=false`, `ZOMATO_MCP_TOKEN`, and `APP_PASSWORD` + `SESSION_SECRET`.
 
-Wire real MCP sessions through the composition root — `build_agent()` in `app/deps.py`
-accepts `zomato_session` and `calendar_session`, and the clients call
-`session.call_tool(name, args)` on them. Nothing else changes.
+Live MCP sessions are opened automatically at startup when `USE_MOCKS=false`
+(`app/integrations/mcp_client.py`): one long-lived Streamable HTTP session per server,
+reused across requests because a per-request handshake costs 300–600ms before any real
+work, and re-established lazily when a call fails. A dead server raises `MCPUnavailable`
+so the agent records an explicit error rather than reporting "no restaurants found".
+
+`tests/test_mcp_live.py` runs the whole pipeline over the real MCP protocol against an
+in-process server. That suite caught three bugs the fixtures structurally could not:
+
+- **`order_id` was silently dropped** — the live API wraps payloads in a `result`
+  envelope that `checkout()` did not unwrap, so a real order would be placed and paid
+  for but left untrackable.
+- **Tool errors read as success** — a failing tool returns a result flagged `is_error`
+  rather than raising, so the agent would have continued on an empty payload.
+- **Wrong field casing** — MCP 1.x uses `isError`/`structuredContent`, 2.x uses
+  `is_error`/`structured_content`. Checking only the 1.x spelling meant neither check
+  ever fired.
 
 ---
 
@@ -273,6 +287,7 @@ app/
     razorpay_rail.py     UPI Autopay mandates, webhook HMAC verification
     mock_rail.py         deterministic offline rail
   integrations/
+    mcp_client.py        live MCP sessions: pooling, reconnect, error surfacing
     zomato_mcp.py        search/menu/cart/checkout, TTL cache, ingress sanitisation
     calendar_mcp.py      schedule reader and meal-gap interval arithmetic
     mocks/fixtures.py    offline catalogue — two fixtures carry live injection payloads
@@ -284,7 +299,8 @@ evals/
   test_injections.json   26-case corpus, malicious and benign
   test_scenarios.json    golden end-to-end workflows
   bench_hotpath.py       control-plane microbenchmark
-tests/                   99 tests: security, flow, API, concurrency, LLM pool, latency
+tests/                   117 tests: security, flow, API, concurrency, live MCP,
+                         LLM pool, latency budgets, deployment config
 ```
 
 ## Known limits
@@ -297,9 +313,6 @@ tests/                   99 tests: security, flow, API, concurrency, LLM pool, l
   accounts and per-user credential storage.
 - **Stripe and Skyfire adapters are not written.** The `PaymentRail` protocol is there and
   Razorpay implements it; those two remain to do.
-- **Live MCP sessions are not constructed.** `build_agent()` accepts them and the clients
-  call `session.call_tool()`, but nothing opens those connections yet. This is the main
-  gap between "runs on mocks" and "orders real food".
 - **The Lyzr backend is not implemented.** `ORCHESTRATOR_BACKEND` currently only supports
   `native`; the published Lyzr package is thin and moves slowly, so it was left as an
   optional extra rather than a hard dependency.

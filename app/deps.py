@@ -27,8 +27,8 @@ from app.runtime import UserRuntime, runtime_for
 log = get_logger(__name__)
 
 __all__ = [
-    "build_agent", "build_rail", "execute_run",
-    "approve_run", "reject_run", "DEFAULT_USER",
+    "build_agent", "build_rail", "execute_run", "approve_run", "reject_run",
+    "set_sessions", "get_sessions", "DEFAULT_USER",
 ]
 
 DEFAULT_USER = "default"
@@ -36,6 +36,21 @@ DEFAULT_USER = "default"
 # One rail instance per rail-config; rails hold pooled HTTP connections and idempotency
 # caches, both of which are wasted if rebuilt per request.
 _RAIL_CACHE: dict[tuple, object] = {}
+
+# Live MCP sessions, installed once at startup. Held here rather than passed through
+# every call site so the CLI, the server and the eval harness all pick them up the
+# same way, and so a reconnect is invisible to callers.
+_SESSIONS: dict[str, object | None] = {"zomato": None, "calendar": None}
+
+
+def set_sessions(zomato: object | None = None, calendar: object | None = None) -> None:
+    """Install live MCP sessions. Called from the server lifespan."""
+    _SESSIONS["zomato"] = zomato
+    _SESSIONS["calendar"] = calendar
+
+
+def get_sessions() -> tuple[object | None, object | None]:
+    return _SESSIONS["zomato"], _SESSIONS["calendar"]
 
 
 def build_rail(settings: Settings):
@@ -81,11 +96,12 @@ def build_agent(
     """Wire an agent over the shared per-user runtime."""
     s = settings or get_settings()
     rt: UserRuntime = runtime_for(s, user_id)
+    live_zomato, live_calendar = get_sessions()
     return FoodOrderingAgent(
         AgentDeps(
             settings=s,
-            zomato=ZomatoClient(s, mcp_session=zomato_session),
-            schedule=ScheduleReader(s, mcp_session=calendar_session),
+            zomato=ZomatoClient(s, mcp_session=zomato_session or live_zomato),
+            schedule=ScheduleReader(s, mcp_session=calendar_session or live_calendar),
             wallet=rt.wallet,
             policy=rt.policy,
             memory=rt.memory,
