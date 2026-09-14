@@ -1,13 +1,12 @@
 # Declarative contract for this agent.
 #
-# This file is not documentation that drifts. `tests/test_manifest.py` asserts every
-# value below against the code that enforces it -- the tool allowlist in
-# app/security/policy.py, the caps in app/config.py, the PII inventory in
-# app/privacy.py, the deploy in render.yaml. Change the code without changing this
-# file and CI fails, which is the only way a manifest stays true.
+# Not documentation that drifts: tests/test_manifest.py asserts every value below
+# against the code that enforces it -- the tool allowlist in app/security/policy.py,
+# the caps in app/config.py, the settlement ladder in app/payments/settlement.py, and
+# the deployed values in render.yaml. Change the code without changing this file and
+# CI fails, which is the only way a manifest stays true.
 #
-# It holds no secrets. Every credential is an environment variable, named here and
-# valued only in the deployment environment.
+# Holds no secrets. Credentials are environment variables, valued only in deployment.
 
 spec_version: 0.1.0
 name: zomato-wallet-order
@@ -15,47 +14,10 @@ description: >-
   An autonomous agent that monitors a schedule and orders food using the Zomato MCP
   and internal wallet balance.
 
-service_name: zomato-agent
-version: 0.2.0
-license: proprietary
-repository: https://github.com/Oruwe/zomato-agent
-
-# --- what it is allowed to decide ------------------------------------------------
-#
-# The model is consulted at exactly one point: which restaurant and which dishes.
-# Its answer is re-grounded against the real catalogue before anything acts on it.
-# Nothing below this line is a decision the model gets to make.
-authority:
-  model_decides:
-    - which restaurant to order from
-    - which dishes to put in the cart
-  model_never_decides:
-    - how much may be spent
-    - which payment rail is used
-    - whether an order needs human approval
-    - which tools may be called
-    - whether an order is placed at all
-
-# --- reasoning -------------------------------------------------------------------
-reasoning:
-  orchestrator: native          # `lyzr` is declared in config but not implemented
-  provider: google
-  model: gemini-2.5-flash
-  fallbacks:
-    - gemini-2.5-flash-lite
-    - gemini-2.0-flash
-  temperature: 0.0              # reproducible evals; an injection cannot win a coin-flip
-  max_output_tokens: 2048
-  timeout_s: 30.0
-  max_steps: 12
-  # With no API key the deterministic planner runs instead. The agent is fully
-  # functional without an LLM; the model improves selection, it does not enable it.
-  degrades_to: deterministic
-
 # --- tools -----------------------------------------------------------------------
 #
-# The planner may name these and nothing else. An unknown tool name is denied
-# outright, which neutralises "call the payout tool" regardless of phrasing.
+# The planner may name these and nothing else. An unknown tool name is denied outright,
+# which neutralises "call the payout tool" regardless of phrasing.
 tools:
   - name: get_saved_addresses
     server: zomato
@@ -79,45 +41,30 @@ tools:
     server: zomato
     mutating: true
 
-mcp_servers:
-  zomato:
-    url: https://mcp.zomato.com/mcp
-    auth: per-user session; token in ZOMATO_MCP_TOKEN
-    timeout_s: 20.0
-    cache_ttl_s: 300.0
-  calendar:
-    url: ""                     # set CALENDAR_MCP_URL to attach a live calendar
-    auth: token in CALENDAR_MCP_TOKEN
-    timeout_s: 20.0
-
 # --- money -----------------------------------------------------------------------
 #
 # Zomato is the merchant of record: it collects from the user directly, and its MCP
-# accepts only the two settlement types below. The wallet authorises spend; it does
-# not move money. `agent_debits_rail` is the separate question of whether the agent
-# also debits its own rail, and it is off.
+# accepts only the two settlement types below. The wallet authorises spend; it does not
+# move money.
 money:
   unit: paise                   # integer minor units everywhere; never float rupees
   merchant_of_record: zomato
   settlement_types: [upi, cash_on_delivery]
   default_settlement: upi
   agent_debits_rail: false
-  rail: mock                    # mock | razorpay | stripe | skyfire
   caps_inr:
     per_order: 1000
     daily: 1500
-    # NPCI's UPI Circle caps full delegation to a secondary user -- the slot an agent
-    # occupies under the Unified Agent Protocol -- at Rs 15,000/month. Setting this
-    # higher does not buy headroom, it just turns a clear refusal into a decline.
+    # NPCI's UPI Circle caps full delegation to a secondary user at Rs 15,000/month.
+    # Setting this higher turns a clear refusal into a rail decline.
     monthly: 15000
     human_approval_above: 800
   semantics: reserve -> commit | release, journalled with fsync before the call returns
 
   # The priority is a payment nobody has to touch. Zomato applies a user's Zomato Money
-  # balance during a `upi` checkout and raises no collect request when it covers the
-  # bill -- that is the hands-off path. There is no balance tool on the MCP and no wallet
-  # value in its checkout enum, so the agent works from a declared estimate and corrects
-  # it against what orders actually do.
+  # during a `upi` checkout and raises no collect request when it covers the bill. There
+  # is no balance tool on the MCP, so the agent works from a declared estimate and
+  # corrects it against what orders actually do.
   settlement:
     ladder: [zomato_money, cash_on_delivery, upi]
     balance: a declared estimate, corrected by outcomes; never presented as a reading
@@ -126,115 +73,27 @@ money:
       - balance falls short     -> cash on delivery, placed with no approval step
       - cash not permitted      -> upi collect request, which the user approves
       - nothing permitted       -> the run is refused rather than guessing a rail
-    corrections:
-      settled with no human step: subtract the bill from the estimate
-      raised a collect request we did not expect: write the estimate below that bill
     decided_by: deterministic code; the planner's output never reaches this choice
 
 # --- safety ----------------------------------------------------------------------
 #
-# All three must be deliberately flipped before a rupee can move. The defaults are
-# load-bearing: they are what makes an accidental deploy harmless.
+# Defaults are load-bearing: all three must be deliberately flipped before a rupee can
+# move, which is what makes an accidental deploy harmless.
 safety:
   dry_run: true
   allow_autonomous_checkout: false
   live_money_requires: [dry_run=false, allow_autonomous_checkout=true, rail!=mock]
-
-guardrails:
-  ingress_sanitisation: NFKC normalise, strip zero-width and bidi controls, cap length
-  delimiter_isolation: nonce-tagged blocks around every untrusted span
-  canary_token: per-run; its appearance in output means the boundary leaked
   injection_block_threshold: 2
-  # The calendar is the channel an attacker can write to (Gmail auto-creates events).
-  # Intent is read from it through a closed vocabulary of food words, so the calendar
-  # may name a dish and can never issue an instruction.
+  # The calendar is attacker-writable (Gmail auto-creates events), so intent is read
+  # from it through a closed vocabulary of food words: it may name a dish and can never
+  # issue an instruction.
   intent_extraction: allowlist
-  guarantee: >-
-    Detection is best-effort and tuned to a corpus. The deterministic policy engine is
-    what actually bounds spend, tools and payment type -- a novel phrasing may score
-    clean and still cannot buy anything.
-
-# --- how it chooses --------------------------------------------------------------
-selection:
-  min_restaurant_rating: 3.8
-  min_dish_rating: 3.5          # a 4.0 restaurant can serve a 2.4 biryani
-  auto_substitute: false        # asks rather than quietly delivering something else
-  delivery_buffer_min: 10       # slack between estimated arrival and a stated deadline
-  # A planned meal names an arrival time, not an order time:
-  #   order_at = deliver_by - eta - buffer
-  # A restaurant that cannot make the deadline is not a candidate, however good it is.
-  deadline_is: constraint
-
-# --- personal data ---------------------------------------------------------------
-#
-# Mirrors app/privacy.py. `persisted: false` means it lives only in process memory for
-# the length of a request. Calendar free text is never journalled and never prompted --
-# only a title-free summary of the gap leaves the process.
-data:
-  retention: append-only journals under MEMORY_PATH, capped at 5000 events per user
-  rights: [access, erasure]     # GET /api/me/data, DELETE /api/me/data
-  inventory:
-    - category: Phone number
-      persisted: false
-      sent_to_model: false
-    - category: Delivery address
-      persisted: false
-      sent_to_model: false
-    - category: Name and email
-      persisted: false
-      sent_to_model: false
-    - category: Calendar contents
-      persisted: false
-      sent_to_model: false
-    - category: Free time
-      persisted: true
-      sent_to_model: true
-    - category: Order history
-      persisted: true
-      sent_to_model: true
-    - category: Dietary constraints
-      persisted: true
-      sent_to_model: true
-    - category: Financial
-      persisted: true
-      sent_to_model: false
-
-# --- when it runs ----------------------------------------------------------------
-#
-# The schedule lives outside the service so a restart cannot double-order and a
-# missed tick fails loudly. Times are IST; render.yaml stores them UTC-corrected.
-schedule:
-  timezone: Asia/Kolkata
-  triggers:
-    - slot: breakfast
-      at: "08:30"
-    - slot: lunch
-      at: "12:30"
-    - slot: dinner
-      at: "20:00"
-  transport: POST /webhook/schedule-tick, authenticated by WEBHOOK_SHARED_SECRET
-
-# --- operations ------------------------------------------------------------------
-interfaces:
-  http: FastAPI on PORT (default 10000)
-  ui: /            # dashboard, password-gated
-  health: [/healthz, /readyz]
-  cli: zomato-agent
-
-limits:
-  rate_per_minute: 60
-  run_rate_per_minute: 10
-  auth_rate_per_minute: 8
-  workers: 1       # the wallet ledger is in-process; replicas would each see a full cap
-
-secrets:           # names only; values live in the deployment environment
-  - GEMINI_API_KEY
-  - GEMINI_API_KEYS
-  - ZOMATO_MCP_TOKEN
-  - CALENDAR_MCP_TOKEN
-  - APP_PASSWORD
-  - SESSION_SECRET
-  - WEBHOOK_SHARED_SECRET
-  - RAZORPAY_KEY_ID
-  - RAZORPAY_KEY_SECRET
-  - RAZORPAY_WEBHOOK_SECRET
+  # The model is consulted at one point -- which restaurant, which dishes -- and its
+  # answer is re-grounded against the real catalogue. Everything here is decided by
+  # code its output does not reach.
+  model_never_decides:
+    - how much may be spent
+    - which payment rail is used
+    - whether an order needs human approval
+    - which tools may be called
+    - whether an order is placed at all
