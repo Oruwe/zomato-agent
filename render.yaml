@@ -36,13 +36,26 @@ services:
         value: "800"
       - key: GEMINI_MODEL
         value: gemini-2.5-flash
+      - key: GEMINI_MODEL_FALLBACKS
+        value: gemini-2.5-flash-lite,gemini-2.0-flash
+      - key: RATE_LIMIT_PER_MINUTE
+        value: "60"
+      - key: RATE_LIMIT_RUN_PER_MINUTE
+        value: "10"
       - key: MEMORY_PATH
         value: /data/memory
       # Secrets: set these in the Render dashboard, never in this file.
       - key: GEMINI_API_KEY
         sync: false
-      - key: WEBHOOK_SHARED_SECRET
+      - key: GEMINI_API_KEYS
         sync: false
+      # Required in prod: the service refuses to start without these two.
+      - key: APP_PASSWORD
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: WEBHOOK_SHARED_SECRET
+        generateValue: true
       - key: RAZORPAY_KEY_ID
         sync: false
       - key: RAZORPAY_KEY_SECRET

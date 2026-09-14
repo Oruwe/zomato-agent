@@ -13,6 +13,7 @@ Decision vocabulary:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time
 from enum import Enum
@@ -83,15 +84,40 @@ class OrderPolicy:
 
 
 class PolicyEngine:
-    __slots__ = ("policy", "wallet")
+    __slots__ = ("policy", "wallet", "_blocked_provider")
 
-    def __init__(self, policy: OrderPolicy, wallet: Wallet) -> None:
+    def __init__(
+        self,
+        policy: OrderPolicy,
+        wallet: Wallet,
+        blocked_provider: Callable[[], frozenset[str]] | None = None,
+    ) -> None:
         self.policy = policy
         self.wallet = wallet
+        # Optional live source of dietary constraints, so a newly stated allergy applies
+        # to the very next order rather than after a restart.
+        self._blocked_provider = blocked_provider
+
+    def blocked_ingredients(self) -> frozenset[str]:
+        if self._blocked_provider is not None:
+            return self._blocked_provider() | self.policy.blocked_ingredients
+        return self.policy.blocked_ingredients
 
     def validate(
-        self, tool: str, args: dict[str, Any], *, local_now: datetime | None = None
+        self,
+        tool: str,
+        args: dict[str, Any],
+        *,
+        local_now: datetime | None = None,
+        held_paise: int = 0,
     ) -> PolicyDecision:
+        """Validate one proposed tool call.
+
+        ``held_paise`` is a reservation the caller already took from the wallet for this
+        same order. Affordability is then already proven atomically, so the wallet probe
+        below is skipped -- without this the probe would be checked *on top of* the
+        caller's own hold and falsely reject a legitimate order close to the cap.
+        """
         start = now_ns()
         try:
             if tool not in ALLOWED_TOOLS:
@@ -99,7 +125,7 @@ class PolicyEngine:
             if tool == "create_cart":
                 return self._validate_cart(args)
             if tool == "checkout":
-                return self._validate_checkout(args, local_now)
+                return self._validate_checkout(args, local_now, held_paise)
             return PolicyDecision(Decision.ALLOW)
         finally:
             REGISTRY.record_ns("policy.validate", now_ns() - start)
@@ -137,8 +163,9 @@ class PolicyEngine:
             if not isinstance(qty, int) or qty < 1 or qty > 10:
                 return PolicyDecision(Decision.DENY, [f"cart:bad_quantity:{qty!r}"])
             total_qty += qty
+            blocked = self.blocked_ingredients()
             for tag in it.get("_ingredients", ()) or ():
-                if str(tag).lower() in p.blocked_ingredients:
+                if str(tag).lower() in blocked:
                     return PolicyDecision(
                         Decision.DENY, [f"cart:blocked_ingredient:{tag}"]
                     )
@@ -156,7 +183,7 @@ class PolicyEngine:
         return PolicyDecision(Decision.ALLOW)
 
     def _validate_checkout(
-        self, args: dict[str, Any], local_now: datetime | None
+        self, args: dict[str, Any], local_now: datetime | None, held_paise: int = 0
     ) -> PolicyDecision:
         p = self.policy
         cart_id = args.get("cart_id")
@@ -182,17 +209,20 @@ class PolicyEngine:
                 {"amount_paise": amount},
             )
 
-        # Dry-run probe against the wallet: reserve then immediately release, so the
-        # decision reflects real remaining envelope without consuming it.
-        try:
-            hold = self.wallet.authorize(amount)
-        except WalletDenied as exc:
-            return PolicyDecision(
-                Decision.DENY,
-                [f"checkout:wallet_{exc.reason}"],
-                {"requested_paise": exc.requested, "remaining_paise": exc.remaining},
-            )
-        self.wallet.release(hold.hold_id)
+        # When the caller already holds a reservation covering this amount, the wallet
+        # has answered the affordability question atomically and probing again would
+        # double-count. Otherwise probe: reserve, then immediately release, so the
+        # decision reflects the real remaining envelope without consuming it.
+        if held_paise < amount:
+            try:
+                hold = self.wallet.authorize(amount)
+            except WalletDenied as exc:
+                return PolicyDecision(
+                    Decision.DENY,
+                    [f"checkout:wallet_{exc.reason}"],
+                    {"requested_paise": exc.requested, "remaining_paise": exc.remaining},
+                )
+            self.wallet.release(hold.hold_id)
 
         if not p.allow_autonomous_checkout:
             return PolicyDecision(

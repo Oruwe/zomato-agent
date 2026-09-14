@@ -30,7 +30,13 @@ class Settings(BaseSettings):
 
     # ---- LLM -------------------------------------------------------------------
     gemini_api_key: SecretStr = SecretStr("")
+    # Additional keys, comma-separated. The pool rotates across all of them and cools
+    # down individual keys on quota exhaustion instead of failing the request.
+    gemini_api_keys: SecretStr = SecretStr("")
     gemini_model: str = "gemini-2.5-flash"
+    # Ordered fallback chain tried after the primary model, comma-separated.
+    gemini_model_fallbacks: str = "gemini-2.5-flash-lite,gemini-2.0-flash"
+    gemini_quota_cooldown_s: float = 60.0
     gemini_timeout_s: float = 30.0
     gemini_max_output_tokens: int = 2048
     # Deterministic planning: temperature 0 makes evals reproducible and makes an
@@ -92,6 +98,12 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"  # noqa: S104 - containers bind all interfaces by design
     port: int = 10000
     webhook_shared_secret: SecretStr = SecretStr("")
+    # UI auth. Unset app_password runs the UI open (dev only; refused in prod).
+    app_password: SecretStr = SecretStr("")
+    session_secret: SecretStr = SecretStr("")
+    # Simple in-process rate limiting, per client IP.
+    rate_limit_per_minute: int = 60
+    rate_limit_run_per_minute: int = 10
 
     @field_validator("log_level")
     @classmethod

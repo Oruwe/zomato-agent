@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Meal Agent</title>
+<link rel="stylesheet" href="/static/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🍱</text></svg>">
+</head>
+<body>
+
+<!-- Login gate. Shown only when the server reports auth_required. -->
+<div class="login-wrap" id="loginWrap" hidden>
+  <form class="login" id="loginForm">
+    <h1>Meal Agent</h1>
+    <p>Sign in to review what your agent is about to order.</p>
+    <input type="password" id="password" placeholder="Password" autocomplete="current-password" required>
+    <button class="btn" type="submit" id="loginBtn">Sign in</button>
+    <div class="err" id="loginErr"></div>
+  </form>
+</div>
+
+<div class="app" id="app" hidden>
+  <header class="top">
+    <div class="brand">
+      <span class="dot"></span>
+      <span>Meal Agent</span>
+    </div>
+    <span class="spacer"></span>
+    <span class="pill budget num" id="budgetPill">—</span>
+    <span class="pill" id="modePill">—</span>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-view="today"   aria-selected="true">Today</button>
+    <button role="tab" data-view="orders"  aria-selected="false">Orders</button>
+    <button role="tab" data-view="wallet"  aria-selected="false">Wallet</button>
+    <button role="tab" data-view="security" aria-selected="false">Security</button>
+    <button role="tab" data-view="taste"   aria-selected="false">Taste</button>
+  </nav>
+
+  <main>
+    <!-- ---------------- TODAY ---------------- -->
+    <section class="view active" id="view-today">
+      <div id="approvalsHost"></div>
+
+      <div class="card">
+        <div class="hero">
+          <div class="grow">
+            <div class="slot" id="nextSlot">—</div>
+            <div class="when" id="nextWhen">Reading your schedule…</div>
+          </div>
+          <button class="btn" id="orderBtn">Order now</button>
+        </div>
+        <div id="lastRunHost"></div>
+      </div>
+
+      <div class="section-title">Your day</div>
+      <div class="card">
+        <div class="timeline" id="timeline">
+          <div class="skeleton" style="margin:10px 0"></div>
+          <div class="skeleton" style="margin:10px 0;width:70%"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------------- ORDERS ---------------- -->
+    <section class="view" id="view-orders">
+      <div class="section-title">Order history</div>
+      <div class="card" id="ordersHost">
+        <div class="skeleton" style="margin:10px 0"></div>
+      </div>
+    </section>
+
+    <!-- ---------------- WALLET ---------------- -->
+    <section class="view" id="view-wallet">
+      <div class="section-title">Spending envelope</div>
+      <div class="card">
+        <h2>Pre-authorised limits</h2>
+        <p class="sub">The agent cannot spend past these. They are enforced in code, not by the model.</p>
+        <div id="metersHost"></div>
+      </div>
+
+      <div class="section-title">Activity</div>
+      <div class="card">
+        <dl class="kv" id="walletKv"></dl>
+      </div>
+    </section>
+
+    <!-- ---------------- SECURITY ---------------- -->
+    <section class="view" id="view-security">
+      <div class="section-title">Active guards</div>
+      <div class="card" id="guardsHost"></div>
+
+      <div class="section-title">Model availability</div>
+      <div class="card" id="llmHost"></div>
+
+      <div class="section-title">Blocked manipulation attempts</div>
+      <div class="card" id="threatsHost"></div>
+    </section>
+
+    <!-- ---------------- TASTE ---------------- -->
+    <section class="view" id="view-taste">
+      <div class="section-title">Hard constraints</div>
+      <div class="card">
+        <h2>Never order these</h2>
+        <p class="sub">Allergies and dietary rules. Enforced as policy — an order containing these is refused outright, not just discouraged.</p>
+        <div class="chips" id="dietaryChips"></div>
+        <div class="inputrow">
+          <input id="dietaryInput" placeholder="e.g. peanut, shellfish" autocomplete="off">
+          <button class="btn sm" data-add="dietary">Add</button>
+        </div>
+      </div>
+
+      <div class="section-title">Preferences</div>
+      <div class="card">
+        <h2>Likes</h2>
+        <p class="sub">Nudges the agent toward what you actually enjoy.</p>
+        <div class="chips" id="likeChips"></div>
+        <div class="inputrow">
+          <input id="likeInput" placeholder="e.g. biryani, south indian" autocomplete="off">
+          <button class="btn sm" data-add="likes">Add</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Dislikes</h2>
+        <p class="sub">Avoided where possible.</p>
+        <div class="chips" id="dislikeChips"></div>
+        <div class="inputrow">
+          <input id="dislikeInput" placeholder="e.g. mushroom" autocomplete="off">
+          <button class="btn sm" data-add="dislikes">Add</button>
+        </div>
+      </div>
+
+      <div class="section-title">What the agent has learned</div>
+      <div class="card">
+        <dl class="kv" id="learnedKv"></dl>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

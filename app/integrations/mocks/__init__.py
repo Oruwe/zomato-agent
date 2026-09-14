@@ -4,6 +4,7 @@ from app.integrations.mocks.fixtures import (
     MOCK_MENUS,
     MOCK_RESTAURANTS,
     MOCK_SCHEDULE,
+    mock_schedule_for,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "MOCK_MENUS",
     "MOCK_CARTS",
     "MOCK_SCHEDULE",
+    "mock_schedule_for",
 ]

@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from app.config import Settings
+from app.core.llm_pool import GeminiPool
 from app.core.memory import PreferenceProfile
 from app.core.prompts import build_selection_prompt, build_system_prompt
 from app.integrations.calendar_mcp import ScheduleGap
@@ -173,17 +174,19 @@ class DeterministicPlanner:
 
 
 class GeminiPlanner:
-    """Gemini 2.5 Flash, temperature 0, JSON-constrained output."""
+    """Gemini at temperature 0 with JSON-constrained output, over a failover pool."""
 
     name = "gemini"
 
-    def __init__(self, settings: Settings, canary: str, nonce: str) -> None:
-        from google import genai  # imported lazily so the package stays optional
-
+    def __init__(
+        self, settings: Settings, canary: str, nonce: str, pool: GeminiPool | None = None
+    ) -> None:
         self._settings = settings
         self._canary = canary
         self._nonce = nonce
-        self._client = genai.Client(api_key=settings.gemini_api_key.get_secret_value())
+        self._pool = pool or GeminiPool.from_settings(settings)
+        if self._pool is None:
+            raise ValueError("no Gemini API key configured")
         self._fallback = DeterministicPlanner()
 
     async def select(
@@ -207,8 +210,7 @@ class GeminiPlanner:
         )
         start = now_ns()
         try:
-            resp = await self._client.aio.models.generate_content(
-                model=self._settings.gemini_model,
+            raw, meta = await self._pool.generate(
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=build_system_prompt(nonce=self._nonce, canary=self._canary),
@@ -217,9 +219,12 @@ class GeminiPlanner:
                     response_mime_type="application/json",
                 ),
             )
-            raw = (resp.text or "").strip()
+            raw = raw.strip()
+            log.info("gemini selection complete", extra=meta)
         except Exception as exc:  # noqa: BLE001 - degrade, never fail the run
-            log.warning("gemini planner failed, falling back", extra={"error": str(exc)})
+            # Every key and model was exhausted. The deterministic planner still
+            # produces a valid order, so an LLM outage degrades quality, not uptime.
+            log.warning("gemini pool exhausted, falling back", extra={"error": str(exc)})
             return await self._fallback.select(
                 gap=gap, profile=profile, candidates=candidates, budget_paise=budget_paise
             )
@@ -316,14 +321,35 @@ def _parse_json(raw: str) -> dict[str, Any] | None:
         return None
 
 
+# One pool per process: key health and cooldowns must be shared across runs, or every
+# request would rediscover an exhausted key for itself.
+_POOL: GeminiPool | None = None
+_POOL_KEY: tuple | None = None
+
+
+def get_pool(settings: Settings) -> GeminiPool | None:
+    global _POOL, _POOL_KEY
+    key = (
+        settings.gemini_api_key.get_secret_value()[:8],
+        settings.gemini_api_keys.get_secret_value()[:8],
+        settings.gemini_model,
+        settings.gemini_model_fallbacks,
+    )
+    if _POOL is not None and _POOL_KEY == key:
+        return _POOL
+    _POOL = GeminiPool.from_settings(settings)
+    _POOL_KEY = key
+    return _POOL
+
+
 def make_planner(settings: Settings, *, canary: str, nonce: str) -> Planner:
     """Pick a planner. Falls back to deterministic whenever Gemini is unavailable."""
-    key = settings.gemini_api_key.get_secret_value()
-    if not key:
-        log.info("no GEMINI_API_KEY set; using deterministic planner")
+    pool = get_pool(settings)
+    if pool is None:
+        log.info("no Gemini API key set; using deterministic planner")
         return DeterministicPlanner()
     try:
-        return GeminiPlanner(settings, canary=canary, nonce=nonce)
+        return GeminiPlanner(settings, canary=canary, nonce=nonce, pool=pool)
     except Exception as exc:  # noqa: BLE001
         log.warning("gemini unavailable; using deterministic planner", extra={"error": str(exc)})
         return DeterministicPlanner()

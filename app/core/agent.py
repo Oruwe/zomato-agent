@@ -227,6 +227,7 @@ class FoodOrderingAgent:
 
         run.transition(OrderState.ITEMS_SELECTED)
         run.restaurant = selection.restaurant_name
+        run.res_id = selection.res_id
         run.dishes = selection.dish_names
         run.record("select_items", True,
                    {"backend": selection.backend, "restaurant": selection.restaurant_name,
@@ -299,6 +300,7 @@ class FoodOrderingAgent:
             {"cart_id": cart.cart_id, "amount_paise": cart.total_paise,
              "payment_method_type": s.zomato_settlement_type},
             local_now=current,
+            held_paise=hold.amount_paise,
         )
         run.record("policy_checkout", verdict.allowed,
                    {"decision": verdict.decision.value, "reasons": verdict.reasons})

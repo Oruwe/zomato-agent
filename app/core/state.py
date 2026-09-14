@@ -76,6 +76,7 @@ class AgentRun:
     cart_id: str | None = None
     amount_paise: int = 0
     restaurant: str | None = None
+    res_id: int | None = None
     dishes: list[str] = field(default_factory=list)
     slot: str | None = None
     escalation_reason: str | None = None

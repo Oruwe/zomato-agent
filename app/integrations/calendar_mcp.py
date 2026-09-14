@@ -17,7 +17,7 @@ from datetime import UTC, date, datetime, time, timedelta, timezone
 from typing import Any
 
 from app.config import Settings
-from app.integrations.mocks import MOCK_SCHEDULE
+from app.integrations.mocks import mock_schedule_for
 from app.observability.latency import REGISTRY, now_ns
 from app.observability.logger import get_logger
 from app.security.guardrails import sanitize
@@ -103,7 +103,7 @@ class ScheduleReader:
         end = start + timedelta(days=1)
 
         if self.use_mocks:
-            raw = MOCK_SCHEDULE
+            raw = mock_schedule_for(target)
         else:
             result = await self._session.call_tool(
                 "list_events",
