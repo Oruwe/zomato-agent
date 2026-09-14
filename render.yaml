@@ -1,0 +1,92 @@
+# Render blueprint. Deploy with: render.com -> New -> Blueprint -> point at this repo.
+#
+# The web service holds the wallet ledger and memory; the cron jobs simply poke it at
+# meal times over an authenticated webhook. Keeping the schedule external means the
+# service stays stateless across restarts and a missed tick never silently double-orders.
+services:
+  - type: web
+    name: zomato-agent
+    runtime: docker
+    plan: starter
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: ENVIRONMENT
+        value: prod
+      - key: LOG_LEVEL
+        value: INFO
+      # Safety defaults. Flip DRY_RUN only after watching a full dry run in prod logs.
+      - key: DRY_RUN
+        value: "true"
+      - key: ALLOW_AUTONOMOUS_CHECKOUT
+        value: "false"
+      - key: USE_MOCKS
+        value: "true"
+      - key: PAYMENT_RAIL
+        value: mock
+      - key: ZOMATO_SETTLEMENT_TYPE
+        value: upi
+      - key: MAX_PER_ORDER_INR
+        value: "1000"
+      - key: DAILY_CAP_INR
+        value: "1500"
+      - key: MONTHLY_CAP_INR
+        value: "20000"
+      - key: HUMAN_APPROVAL_ABOVE_INR
+        value: "800"
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: MEMORY_PATH
+        value: /data/memory
+      # Secrets: set these in the Render dashboard, never in this file.
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: WEBHOOK_SHARED_SECRET
+        sync: false
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false
+      - key: ZOMATO_MCP_TOKEN
+        sync: false
+    # The wallet journal and memory must outlive a deploy, or spend caps reset on restart.
+    disk:
+      name: agent-state
+      mountPath: /data
+      sizeGB: 1
+
+  # Meal-time ticks. Cron is UTC; times below are IST-corrected.
+  - type: cron
+    name: tick-breakfast          # 08:30 IST
+    runtime: docker
+    schedule: "0 3 * * *"
+    dockerCommand: sh -c 'curl -fsS -X POST "$AGENT_URL/webhook/schedule-tick" -H "X-Agent-Secret: $WEBHOOK_SHARED_SECRET" -H "Content-Type: application/json" -d "{\"slot\":\"breakfast\"}"'
+    envVars:
+      - key: AGENT_URL
+        sync: false
+      - key: WEBHOOK_SHARED_SECRET
+        sync: false
+
+  - type: cron
+    name: tick-lunch              # 12:30 IST
+    runtime: docker
+    schedule: "0 7 * * *"
+    dockerCommand: sh -c 'curl -fsS -X POST "$AGENT_URL/webhook/schedule-tick" -H "X-Agent-Secret: $WEBHOOK_SHARED_SECRET" -H "Content-Type: application/json" -d "{\"slot\":\"lunch\"}"'
+    envVars:
+      - key: AGENT_URL
+        sync: false
+      - key: WEBHOOK_SHARED_SECRET
+        sync: false
+
+  - type: cron
+    name: tick-dinner             # 20:00 IST
+    runtime: docker
+    schedule: "30 14 * * *"
+    dockerCommand: sh -c 'curl -fsS -X POST "$AGENT_URL/webhook/schedule-tick" -H "X-Agent-Secret: $WEBHOOK_SHARED_SECRET" -H "Content-Type: application/json" -d "{\"slot\":\"dinner\"}"'
+    envVars:
+      - key: AGENT_URL
+        sync: false
+      - key: WEBHOOK_SHARED_SECRET
+        sync: false

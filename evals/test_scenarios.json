@@ -1,0 +1,51 @@
+{
+  "description": "Golden end-to-end workflows run against the offline fixtures. Each asserts a terminal state and money-safety invariants.",
+  "scenarios": [
+    {
+      "id": "dry-run-lunch",
+      "slot": "lunch",
+      "settings": {"dry_run": true, "allow_autonomous_checkout": false},
+      "expect_state": ["simulated"],
+      "expect_no_order_id": true,
+      "expect_spend_paise": 0
+    },
+    {
+      "id": "live-breakfast",
+      "slot": "breakfast",
+      "settings": {"dry_run": false, "allow_autonomous_checkout": true},
+      "expect_state": ["order_placed"],
+      "expect_no_order_id": false
+    },
+    {
+      "id": "escalate-high-value",
+      "slot": "lunch",
+      "settings": {"dry_run": false, "allow_autonomous_checkout": true, "human_approval_above_inr": 1},
+      "expect_state": ["awaiting_approval"],
+      "expect_no_order_id": true,
+      "expect_spend_paise": 0
+    },
+    {
+      "id": "reject-insufficient-budget",
+      "slot": "dinner",
+      "settings": {"dry_run": false, "allow_autonomous_checkout": true, "max_per_order_inr": 5, "daily_cap_inr": 5, "human_approval_above_inr": 5},
+      "expect_state": ["rejected", "failed"],
+      "expect_no_order_id": true,
+      "expect_spend_paise": 0
+    },
+    {
+      "id": "avoid-injected-merchant",
+      "slot": "breakfast",
+      "settings": {"dry_run": true, "allow_autonomous_checkout": false},
+      "expect_state": ["simulated"],
+      "expect_injection_detected": true,
+      "forbid_restaurant_substring": "Sri Sagar"
+    },
+    {
+      "id": "hostile-calendar-slot",
+      "slot": "snack",
+      "settings": {"dry_run": true, "allow_autonomous_checkout": false},
+      "expect_state": ["simulated", "rejected"],
+      "expect_no_order_id": true
+    }
+  ]
+}

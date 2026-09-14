@@ -1,0 +1,59 @@
+[project]
+name = "zomato-agent"
+version = "0.1.0"
+description = "Autonomous, schedule-driven food-ordering agent with a pre-authorized spend wallet and prompt-injection hardening."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "google-genai>=2.0,<3",
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.3,<3",
+    "httpx>=0.27",
+    "mcp>=1.9,<3",
+    "python-dateutil>=2.9",
+]
+
+[project.optional-dependencies]
+# Lyzr is pinned as an optional extra on purpose: the published package is thin and
+# moves slowly, so the orchestrator degrades to the native Gemini backend when it is
+# absent. See app/core/orchestrator.py.
+lyzr = ["lyzr>=0.1.40"]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "respx>=0.21",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+zomato-agent = "app.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "S"]
+# UP042: `str, Enum` is used deliberately and consistently so enum values round-trip
+# through JSON and pydantic as plain strings.
+ignore = ["S101", "E501", "UP042"]
+
+[tool.ruff.lint.per-file-ignores]
+# B008: `Depends(...)` in a default is the documented FastAPI idiom, not a bug.
+"app/main.py" = ["B008"]
+"tests/*" = ["S105", "S106"]
+"evals/*" = ["S105", "S106"]
