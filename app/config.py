@@ -85,6 +85,14 @@ class Settings(BaseSettings):
     # Restaurants below this rating are never considered. Applied as a search filter and
     # re-checked locally, since a search backend is free to ignore the filter.
     min_restaurant_rating: float = 3.8
+    # A dish must clear this to count as "the thing the user asked for". A well-rated
+    # restaurant can still serve one badly-reviewed dish, and when the schedule named
+    # that dish the restaurant's average is the wrong number to judge it by.
+    min_dish_rating: float = 3.5
+    # When the requested dish is not available at acceptable quality anywhere nearby,
+    # should the agent order something else instead of asking? Off by default: the user
+    # asked for biryani, and quietly delivering idli is not a helpful answer.
+    auto_substitute: bool = False
 
     razorpay_key_id: str = ""
     razorpay_key_secret: SecretStr = SecretStr("")

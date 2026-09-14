@@ -64,6 +64,14 @@ class MenuItem:
     ingredients: list[str] = field(default_factory=list)
     add_ons: list[dict] = field(default_factory=list)
     risk_score: int = 0
+    # Dish-level rating. A well-rated restaurant can still serve one bad dish, and when
+    # the user asked for *that dish* the restaurant's average is the wrong number to use.
+    rating: float = 0.0
+    rating_count: int = 0
+
+    @property
+    def has_rating(self) -> bool:
+        return self.rating > 0 and self.rating_count > 0
 
 
 @dataclass(slots=True)
@@ -318,6 +326,10 @@ class ZomatoClient:
             ingredients=[str(i).lower() for i in row.get("ingredients", [])],
             add_ons=list(row.get("add_ons", [])),
             risk_score=name_v.score + desc_v.score,
+            rating=_as_float(row.get("rating") or row.get("item_rating")),
+            rating_count=_as_int(
+                row.get("rating_count") or row.get("review_count") or row.get("votes")
+            ),
         )
 
     def _mock_search(
@@ -348,6 +360,20 @@ class ZomatoClient:
         # restaurants rather than returning nothing, so the mock does too -- otherwise a
         # weak keyword looks identical to "there is no food near you".
         return [r for _, r in scored[:page_size]]
+
+
+def _as_float(value) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _as_int(value) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 # -- response unwrapping ---------------------------------------------------------

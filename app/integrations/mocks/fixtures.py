@@ -78,6 +78,19 @@ MOCK_RESTAURANTS: list[dict] = [
         "tags": ["dosa", "idli", "veg", "breakfast"],
     },
     {
+        # The scenario that matters: closest biryani, decent restaurant average, but the
+        # biryani itself is poorly reviewed. Distance alone would pick this.
+        "res_id": 90006,
+        "name": "Biryani Junction",
+        "cuisines": ["Biryani", "Hyderabadi"],
+        "rating": 4.0,
+        "cost_for_two": 350,
+        "eta_minutes": 16,
+        "distance_km": 0.9,
+        "description": "Quick biryani, close by.",
+        "tags": ["biryani", "rice", "non-veg"],
+    },
+    {
         "res_id": 90004,
         "name": "Leon Grill",
         "cuisines": ["Middle Eastern", "Shawarma"],
@@ -130,14 +143,23 @@ MOCK_MENUS: dict[int, dict[str, list[dict]]] = {
             {
                 "item_id": "i_90002_1", "name": "Boneless Chicken Biryani", "price": 360,
                 "veg": False, "variant_id": "v_90002_1", "description": "Signature boneless biryani.",
-                "ingredients": ["chicken", "rice"], "add_ons": [
-                    {"id": "ctl_raita", "name": "Raita", "price": 40}
-                ],
+                "ingredients": ["chicken", "rice"],
+                "rating": 4.6, "rating_count": 2140,
+                "add_ons": [{"id": "ctl_raita", "name": "Raita", "price": 40}],
             },
             {
                 "item_id": "i_90002_2", "name": "Veg Biryani", "price": 280, "veg": True,
                 "variant_id": "v_90002_2", "description": "Mixed vegetable dum biryani.",
                 "ingredients": ["rice", "vegetables"], "add_ons": [],
+                "rating": 4.3, "rating_count": 880,
+            },
+        ],
+        "Sides": [
+            {
+                "item_id": "i_90002_3", "name": "Raita", "price": 60, "veg": True,
+                "variant_id": "v_90002_3", "description": "Cooling curd raita.",
+                "ingredients": ["curd"], "add_ons": [],
+                "rating": 4.2, "rating_count": 410,
             },
         ],
     },
@@ -153,6 +175,25 @@ MOCK_MENUS: dict[int, dict[str, list[dict]]] = {
                 ),
                 "ingredients": ["rice", "potato"], "add_ons": [],
             }
+        ],
+    },
+    90006: {
+        "Biryani": [
+            {
+                "item_id": "i_90006_1", "name": "Chicken Biryani", "price": 240,
+                "veg": False, "variant_id": "v_90006_1",
+                "description": "Hyderabadi style chicken biryani.",
+                "ingredients": ["chicken", "rice"], "add_ons": [],
+                # Restaurant averages 4.0; this dish does not.
+                "rating": 2.4, "rating_count": 310,
+            },
+            {
+                "item_id": "i_90006_2", "name": "Veg Biryani", "price": 190,
+                "veg": True, "variant_id": "v_90006_2",
+                "description": "Vegetable dum biryani.",
+                "ingredients": ["rice", "vegetables"], "add_ons": [],
+                "rating": 2.8, "rating_count": 120,
+            },
         ],
     },
     90004: {

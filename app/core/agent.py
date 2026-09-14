@@ -19,10 +19,11 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
 from app.config import Settings
+from app.core.intent import DishIntent, extract_intent
 from app.core.memory import UserMemory
-from app.core.planner import Selection, make_planner
+from app.core.planner import DeterministicPlanner, Selection, make_planner
 from app.core.state import AgentRun, OrderState
-from app.integrations.calendar_mcp import MEAL_WINDOWS, ScheduleGap, ScheduleReader
+from app.integrations.calendar_mcp import MEAL_WINDOWS, CalendarEvent, ScheduleGap, ScheduleReader
 from app.integrations.payment_status import OrderPaymentState, parse_checkout
 from app.integrations.zomato_mcp import MenuItem, Restaurant, ZomatoClient, ZomatoError
 from app.observability.latency import now_ns
@@ -37,6 +38,38 @@ log = get_logger(__name__)
 __all__ = ["FoodOrderingAgent", "AgentDeps"]
 
 IST = timezone(timedelta(hours=5, minutes=30))
+
+# How far either side of a meal window an event still counts as being "about" that meal.
+_INTENT_WINDOW = timedelta(hours=3)
+
+
+def _intent_from_events(events: list[CalendarEvent], gap: ScheduleGap) -> DishIntent:
+    """Food named by events around this meal window.
+
+    Only events near the gap are considered: a breakfast invite mentioning dosa should
+    not decide dinner.
+    """
+    best = DishIntent()
+    for ev in events:
+        if ev.start > gap.end + _INTENT_WINDOW or ev.end < gap.start - _INTENT_WINDOW:
+            continue
+        found = extract_intent(f"{ev.summary} {ev.description}", source=ev.event_id)
+        if found.dishes and not best.dishes:
+            best = found
+        elif found.sides and best.dishes and not best.sides:
+            best.sides = found.sides
+    return best
+
+
+def extract_intent_from_dict(data: dict | None) -> DishIntent | None:
+    """Rehydrate the intent recorded on the run."""
+    if not data or not (data.get("dishes") or data.get("cuisines")):
+        return None
+    return DishIntent(
+        dishes=list(data.get("dishes", [])), cuisines=list(data.get("cuisines", [])),
+        sides=list(data.get("sides", [])), qualifiers=list(data.get("qualifiers", [])),
+        source=str(data.get("source", "")),
+    )
 
 
 @dataclass(slots=True)
@@ -165,6 +198,11 @@ class FoodOrderingAgent:
         run.transition(OrderState.SLOT_SELECTED)
         run.slot = chosen.slot
         run.order_date = chosen.start.date().isoformat()
+
+        # What did the schedule actually ask for? Calendar text is the most dangerous
+        # input in the system, so this reads only food words from a closed vocabulary --
+        # it can name a dish, never issue an instruction. See app/core/intent.py.
+        run.intent = _intent_from_events(events, chosen).to_dict()
         run.record("select_slot", True, {"slot": chosen.slot, "gap": chosen.describe()})
         return chosen
 
@@ -233,13 +271,22 @@ class FoodOrderingAgent:
         return budget
 
     async def _step_candidates(
-        self, run: AgentRun, address_id: str, gap: ScheduleGap, budget_paise: int
+        self, run: AgentRun, address_id: str, gap: ScheduleGap, budget_paise: int,
+        keyword_override: str | None = None,
     ) -> list[tuple[Restaurant, list[MenuItem]]]:
         t = now_ns()
         profile = self.d.memory.recall(slot=gap.slot)
-        keyword = gap.keyword
-        if profile.top_cuisines:
+        intent = extract_intent_from_dict(run.intent)
+        if keyword_override:
+            keyword = keyword_override
+        elif intent and not intent.empty:
+            # An explicit request beats a learned habit: if the schedule says biryani,
+            # search for biryani, not for whatever they usually eat at this hour.
+            keyword = intent.search_keyword()
+        elif profile.top_cuisines:
             keyword = f"{profile.top_cuisines[0][0]} {gap.keyword}"
+        else:
+            keyword = gap.keyword
 
         min_rating = self.d.settings.min_restaurant_rating
         restaurants = await self.d.zomato.search_restaurants(
@@ -269,7 +316,8 @@ class FoodOrderingAgent:
                 candidates.append((restaurant, menu))
 
         if candidates:
-            run.transition(OrderState.CANDIDATES_FETCHED)
+            if run.state is OrderState.SLOT_SELECTED:
+                run.transition(OrderState.CANDIDATES_FETCHED)
         else:
             run.state = OrderState.REJECTED
             run.escalation_reason = "no restaurants matched the schedule slot and budget"
@@ -289,6 +337,8 @@ class FoodOrderingAgent:
         selection = await planner.select(
             gap=gap, profile=self.d.memory.recall(slot=gap.slot),
             candidates=candidates, budget_paise=budget_paise,
+            intent=extract_intent_from_dict(run.intent),
+            min_dish_rating=self.d.settings.min_dish_rating,
         )
         if selection is None:
             run.state = OrderState.REJECTED
@@ -296,9 +346,30 @@ class FoodOrderingAgent:
             run.record("select_items", False, {"reason": run.escalation_reason})
             return None
 
+        # The requested dish failed. The candidate list was searched *for that dish*, so
+        # it holds no alternatives by construction -- "nothing else fits" would be an
+        # artefact of the query, not a fact about the neighbourhood. Search again without
+        # the dish constraint before concluding anything.
+        if selection is not None and not selection.matched_intent:
+            selection = await self._widen_for_alternative(
+                run, gap, budget_paise, selection
+            )
+
+        # Quietly delivering a substitute is not a helpful answer to "I want biryani", so
+        # unless the user opted in, surface it and let them decide.
+        if not selection.matched_intent and not self.d.settings.auto_substitute:
+            run.state = OrderState.REJECTED
+            run.suggestion = selection.suggestion
+            run.escalation_reason = selection.suggestion
+            run.record("intent_unmet", False,
+                       {"suggestion": selection.suggestion,
+                        "alternative": selection.restaurant_name})
+            return None
+
         run.transition(OrderState.ITEMS_SELECTED)
         run.restaurant = selection.restaurant_name
         run.res_id = selection.res_id
+        run.suggestion = selection.suggestion
         run.dishes = selection.dish_names
         run.record("select_items", True,
                    {"backend": selection.backend, "restaurant": selection.restaurant_name,
@@ -308,6 +379,55 @@ class FoodOrderingAgent:
                     "injection_detected": selection.injection_detected},
                    (now_ns() - t) / 1000.0)
         return selection
+
+    async def _widen_for_alternative(
+        self, run: AgentRun, gap: ScheduleGap, budget_paise: int, failed: Selection
+    ) -> Selection:
+        """Re-search the slot generically to find a genuine alternative."""
+        reason = failed.suggestion.split(" Suggesting")[0].split(" Nothing else")[0]
+        address_id = self.d.address_id or run.steps[0].detail.get("address_id", "")
+
+        # Strip the requested dish out of the slot keyword, or the "wider" search returns
+        # the same narrow set -- the default lunch keyword literally contains "biryani".
+        intent = extract_intent_from_dict(run.intent)
+        wanted = set(intent.dishes) if intent else set()
+        keyword = " ".join(w for w in gap.keyword.split() if w.lower() not in wanted)
+
+        broader = await self._step_candidates(
+            run, address_id, gap, budget_paise, keyword_override=keyword or gap.slot
+        )
+        if not broader:
+            return failed
+
+        # Drop the dishes already refused on quality, and anything else matching the
+        # request: recommending the restaurant we just rejected is not an alternative.
+        refused = set(failed.rejected_variants)
+        pruned = [
+            (r, [m for m in menu
+                 if m.variant_id not in refused
+                 and not any(w in m.name.lower() for w in wanted)])
+            for r, menu in broader
+        ]
+        pruned = [(r, menu) for r, menu in pruned if menu]
+        if not pruned:
+            return failed
+
+        planner = DeterministicPlanner()
+        alternative = await planner.select(
+            gap=gap, profile=self.d.memory.recall(slot=gap.slot),
+            candidates=pruned, budget_paise=budget_paise,
+        )
+        if alternative is None:
+            return failed
+
+        names = ", ".join(i["name"] for i in alternative.items)
+        alternative.matched_intent = False
+        alternative.suggestion = (
+            f"{reason} {names} from {alternative.restaurant_name} instead?"
+        )
+        run.record("widened_search", True,
+                   {"keyword": gap.keyword, "alternative": alternative.restaurant_name})
+        return alternative
 
     async def _step_cart(self, run: AgentRun, selection: Selection, address_id: str):
         s = self.d.settings

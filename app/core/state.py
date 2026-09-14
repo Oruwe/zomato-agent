@@ -85,6 +85,9 @@ class AgentRun:
     # The calendar date this meal is for, which is not always the date the row was
     # written -- a late dinner run can cross midnight.
     order_date: str | None = None
+    # What the schedule asked for, and what we could offer if it was unavailable.
+    intent: dict[str, Any] = field(default_factory=dict)
+    suggestion: str = ""
     escalation_reason: str | None = None
     error: str | None = None
     dry_run: bool = True

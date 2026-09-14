@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from app.config import Settings
+from app.core.intent import DishIntent
 from app.core.llm_pool import GeminiPool
 from app.core.memory import PreferenceProfile
 from app.core.prompts import build_selection_prompt, build_system_prompt
@@ -93,6 +94,13 @@ class Selection:
     injection_detected: bool = False
     injection_notes: str = ""
     backend: str = "deterministic"
+    # Did this satisfy what the schedule actually asked for?
+    matched_intent: bool = True
+    # Set when the request could not be met and this is an alternative instead.
+    suggestion: str = ""
+    # Variants refused on quality. Carried so a widened search cannot recommend the very
+    # dish that was just rejected.
+    rejected_variants: list[str] = field(default_factory=list)
 
     @property
     def dish_names(self) -> list[str]:
@@ -109,7 +117,37 @@ class Planner(Protocol):
         profile: PreferenceProfile,
         candidates: list[tuple[Restaurant, list[MenuItem]]],
         budget_paise: int,
+        intent: DishIntent | None = None,
+        min_dish_rating: float = 3.5,
     ) -> Selection | None: ...
+
+
+def _matches_dish(item: MenuItem, dishes: list[str]) -> bool:
+    """Does this menu item plausibly *be* one of the requested dishes?"""
+    name = item.name.lower()
+    return any(d in name for d in dishes)
+
+
+# Categories that read as an accompaniment rather than a main.
+_SIDE_CATEGORIES = ("side", "accompaniment", "extra", "add", "beverage", "drink",
+                    "dessert", "starter")
+
+
+def _side_preference(item: MenuItem) -> tuple[int, float, int]:
+    """Rank candidate accompaniments: proper sides first, then rating, then price."""
+    category = item.category.lower()
+    is_side = 0 if any(c in category for c in _SIDE_CATEGORIES) else 1
+    return (is_side, -(item.rating or 0.0), item.price_paise)
+
+
+def _dish_quality(item: MenuItem, floor: float) -> bool:
+    """Good enough to count as the dish the user asked for.
+
+    An unrated dish is given the benefit of the doubt: most menu items carry no rating,
+    and refusing everything unrated would make the whole feature useless. A dish that is
+    rated *and* rated badly is the case this exists to catch.
+    """
+    return (not item.has_rating) or item.rating >= floor
 
 
 def _fits(subtotal_paise: int, budget_paise: int) -> bool:
@@ -124,104 +162,280 @@ class DeterministicPlanner:
     async def select(
         self, *, gap: ScheduleGap, profile: PreferenceProfile,
         candidates: list[tuple[Restaurant, list[MenuItem]]], budget_paise: int,
+        intent: DishIntent | None = None, min_dish_rating: float = 3.5,
     ) -> Selection | None:
+        """Choose a restaurant and items.
+
+        When the schedule named a dish, that request is honoured in preference order:
+
+        1. A well-rated version of the dish, wherever it is -- distance loses to quality,
+           because the nearest biryani being the worst biryani is exactly the case a user
+           notices.
+        2. An unrated version of the dish, since most menu items carry no rating.
+        3. Nothing acceptable: return the best alternative *flagged as a substitution*,
+           so the caller can ask rather than quietly serving something else.
+        """
         start = now_ns()
         try:
             blocked = {b.lower() for b in profile.dietary_constraints} | {
                 d.lower() for d in profile.disliked
             }
-            cuisine_rank = _normalise(profile.top_cuisines)
-            dish_rank = _normalise(profile.top_dishes)
-            res_rank = _normalise(profile.top_restaurants)
-            # Most recent order carries the largest penalty, decaying with age, and
-            # repeats accumulate: eating somewhere 6 of the last 6 times should count
-            # against it far more than eating there once.
-            res_penalty = _recency_penalty(profile.recent_restaurants)
-            dish_penalty = _recency_penalty(profile.recent_dishes)
+            wanted = list(intent.dishes) if intent and intent.dishes else []
 
-            best: tuple[float, Restaurant, list[MenuItem], int] | None = None
-            for restaurant, menu in candidates:
-                usable = [
-                    m for m in menu
-                    if not (blocked & set(m.ingredients))
-                    and not any(b in m.name.lower() for b in blocked)
-                ]
-                if not usable:
-                    continue
-
-                chosen, subtotal = self._pick_items(usable, dish_rank, budget_paise)
-                if not chosen:
-                    continue
-
-                score = 0.0
-                score += restaurant.rating * _W_RATING
-                # Best-matching cuisine, not the sum: a restaurant listing five cuisines
-                # should not outscore a better one listing the single right cuisine.
-                cuisine_fit = max(
-                    (cuisine_rank.get(c.lower(), 0.0) for c in restaurant.cuisines),
-                    default=0.0,
+            if wanted:
+                selection = self._select_for_intent(
+                    gap=gap, profile=profile, candidates=candidates,
+                    budget_paise=budget_paise, blocked=blocked, wanted=wanted,
+                    min_dish_rating=min_dish_rating,
                 )
-                score += cuisine_fit * _W_CUISINE
-                score += res_rank.get(restaurant.name.lower(), 0.0) * _W_RESTAURANT
-                dish_fit = (
-                    sum(dish_rank.get(m.name.lower(), 0.0) for m in chosen) / len(chosen)
-                    if chosen else 0.0
-                )
-                score += dish_fit * _W_DISH
-                # Time pressure: a short gap favours fast delivery.
-                if restaurant.eta_minutes and gap.minutes:
-                    if restaurant.eta_minutes > gap.minutes:
-                        score -= 4.0
-                    else:
-                        score += max(0.0, (gap.minutes - restaurant.eta_minutes) / 15.0)
-                # Merchants whose own text tried to manipulate us are penalised hard.
-                score -= restaurant.risk_score * _W_RISK
-                score -= sum(m.risk_score for m in chosen) * 2.0
-                # Variety: recently eaten is less appealing, however well it scores.
-                score -= res_penalty.get(restaurant.name.lower(), 0.0)
-                score -= max(
-                    (dish_penalty.get(m.name.lower(), 0.0) for m in chosen), default=0.0
-                ) * 0.5
+                if selection is not None:
+                    return selection
 
-                if best is None or score > best[0]:
-                    best = (score, restaurant, chosen, subtotal)
-
-            if best is None:
-                return None
-            _, restaurant, chosen, subtotal = best
-            risky = restaurant.risk_score > 0 or any(m.risk_score for m in chosen)
-            return Selection(
-                res_id=restaurant.res_id,
-                restaurant_name=restaurant.name,
-                cuisines=list(restaurant.cuisines),
-                items=[
-                    {"variant_id": m.variant_id, "name": m.name, "quantity": 1,
-                     "_ingredients": m.ingredients}
-                    for m in chosen
-                ],
-                estimated_total_paise=int(subtotal * (1 + _TAX_RATE)) + _DELIVERY_PAISE,
-                reasoning=(
-                    f"{restaurant.name} (rating {restaurant.rating}, ETA "
-                    f"{restaurant.eta_minutes}m) fits the {gap.minutes}min {gap.slot} gap "
-                    f"and matches prior orders."
-                ),
-                injection_detected=risky,
-                injection_notes=(
-                    "; ".join(restaurant.risk_reasons) if restaurant.risk_reasons else ""
-                ),
-                backend=self.name,
+            return self._score_without_intent(
+                gap=gap, profile=profile, candidates=candidates,
+                budget_paise=budget_paise, blocked=blocked,
             )
         finally:
             REGISTRY.record_ns("planner.deterministic.select", now_ns() - start)
+
+    def _score_without_intent(
+        self, *, gap: ScheduleGap, profile: PreferenceProfile,
+        candidates: list[tuple[Restaurant, list[MenuItem]]], budget_paise: int,
+        blocked: set[str], exclude: frozenset[str] = frozenset(),
+    ) -> Selection | None:
+        """Preference-weighted ranking when no particular dish was asked for.
+
+        ``exclude`` drops specific variants from consideration. It exists so that after
+        rejecting a dish for bad reviews, the alternative search cannot turn round and
+        recommend that same dish -- suggesting the restaurant you just refused is a
+        nonsense answer, and it is exactly what happened before this existed.
+        """
+        cuisine_rank = _normalise(profile.top_cuisines)
+        dish_rank = _normalise(profile.top_dishes)
+        res_rank = _normalise(profile.top_restaurants)
+        # Most recent order carries the largest penalty, decaying with age, and repeats
+        # accumulate: eating somewhere 6 of the last 6 times should count against it far
+        # more than eating there once.
+        res_penalty = _recency_penalty(profile.recent_restaurants)
+        dish_penalty = _recency_penalty(profile.recent_dishes)
+
+        best: tuple[float, Restaurant, list[MenuItem], int] | None = None
+        for restaurant, menu in candidates:
+            usable = [
+                m for m in menu
+                if m.variant_id not in exclude
+                and not (blocked & set(m.ingredients))
+                and not any(b in m.name.lower() for b in blocked)
+            ]
+            if not usable:
+                continue
+
+            chosen, subtotal = self._pick_items(usable, dish_rank, budget_paise)
+            if not chosen:
+                continue
+
+            score = restaurant.rating * _W_RATING
+            # Best-matching cuisine, not the sum: a restaurant listing five cuisines
+            # should not outscore a better one listing the single right cuisine.
+            cuisine_fit = max(
+                (cuisine_rank.get(c.lower(), 0.0) for c in restaurant.cuisines),
+                default=0.0,
+            )
+            score += cuisine_fit * _W_CUISINE
+            score += res_rank.get(restaurant.name.lower(), 0.0) * _W_RESTAURANT
+            dish_fit = (
+                sum(dish_rank.get(m.name.lower(), 0.0) for m in chosen) / len(chosen)
+            )
+            score += dish_fit * _W_DISH
+            # Time pressure: a short gap favours fast delivery.
+            if restaurant.eta_minutes and gap.minutes:
+                if restaurant.eta_minutes > gap.minutes:
+                    score -= 4.0
+                else:
+                    score += max(0.0, (gap.minutes - restaurant.eta_minutes) / 15.0)
+            # Merchants whose own text tried to manipulate us are penalised hard.
+            score -= restaurant.risk_score * _W_RISK
+            score -= sum(m.risk_score for m in chosen) * 2.0
+            # Variety: recently eaten is less appealing, however well it scores.
+            score -= res_penalty.get(restaurant.name.lower(), 0.0)
+            score -= max(
+                (dish_penalty.get(m.name.lower(), 0.0) for m in chosen), default=0.0
+            ) * 0.5
+
+            if best is None or score > best[0]:
+                best = (score, restaurant, chosen, subtotal)
+
+        if best is None:
+            return None
+        _, restaurant, chosen, subtotal = best
+        risky = restaurant.risk_score > 0 or any(m.risk_score for m in chosen)
+        return Selection(
+            res_id=restaurant.res_id,
+            restaurant_name=restaurant.name,
+            cuisines=list(restaurant.cuisines),
+            items=[
+                {"variant_id": m.variant_id, "name": m.name, "quantity": 1,
+                 "_ingredients": m.ingredients}
+                for m in chosen
+            ],
+            estimated_total_paise=int(subtotal * (1 + _TAX_RATE)) + _DELIVERY_PAISE,
+            reasoning=(
+                f"{restaurant.name} (rating {restaurant.rating}, ETA "
+                f"{restaurant.eta_minutes}m) fits the {gap.minutes}min {gap.slot} gap "
+                f"and matches prior orders."
+            ),
+            injection_detected=risky,
+            injection_notes=(
+                "; ".join(restaurant.risk_reasons) if restaurant.risk_reasons else ""
+            ),
+            backend=self.name,
+        )
+
+    def _select_for_intent(
+        self, *, gap: ScheduleGap, profile: PreferenceProfile,
+        candidates: list[tuple[Restaurant, list[MenuItem]]], budget_paise: int,
+        blocked: set[str], wanted: list[str], min_dish_rating: float,
+    ) -> Selection | None:
+        """Honour a named dish, or report honestly that it could not be honoured."""
+        graded: list[tuple[Restaurant, MenuItem, bool]] = []
+        for restaurant, menu in candidates:
+            for item in menu:
+                if blocked & set(item.ingredients):
+                    continue
+                if any(b in item.name.lower() for b in blocked):
+                    continue
+                if not _matches_dish(item, wanted):
+                    continue
+                if item.price_paise <= 0 or not _fits(item.price_paise, budget_paise):
+                    continue
+                graded.append((restaurant, item, _dish_quality(item, min_dish_rating)))
+
+        good = [(r, i) for r, i, ok in graded if ok]
+        poor = [(r, i) for r, i, ok in graded if not ok]
+
+        if good:
+            # Rank by the dish, then the restaurant -- the dish is what was asked for.
+            good.sort(
+                key=lambda pair: (
+                    -(pair[1].rating or 0.0),
+                    -pair[0].rating,
+                    -pair[1].rating_count,
+                    pair[0].eta_minutes,
+                )
+            )
+            restaurant, item = good[0]
+            menu = next(m for r, m in candidates if r.res_id == restaurant.res_id)
+            chosen = [item]
+            subtotal = item.price_paise
+
+            # "biryani with sides" -- add the best-rated affordable accompaniment from
+            # the same restaurant, since a cart cannot span two. A second helping of the
+            # same dish is not a side, so anything matching the request is excluded:
+            # "biryani with sides" asking for two biryanis is a wrong answer.
+            for extra in sorted(menu, key=_side_preference):
+                if extra.variant_id == item.variant_id or extra.price_paise <= 0:
+                    continue
+                if _matches_dish(extra, wanted):
+                    continue
+                if blocked & set(extra.ingredients):
+                    continue
+                if any(b in extra.name.lower() for b in blocked):
+                    continue
+                if _fits(subtotal + extra.price_paise, budget_paise):
+                    chosen.append(extra)
+                    subtotal += extra.price_paise
+                    break
+
+            rejected = ""
+            if poor:
+                worst = min(poor, key=lambda pair: pair[1].rating or 0.0)
+                rejected = (
+                    f" Skipped {worst[0].name} ({worst[1].name} rated "
+                    f"{worst[1].rating:.1f}) despite being closer."
+                )
+            return Selection(
+                res_id=restaurant.res_id, restaurant_name=restaurant.name,
+                cuisines=list(restaurant.cuisines),
+                items=[{"variant_id": m.variant_id, "name": m.name, "quantity": 1,
+                        "_ingredients": m.ingredients} for m in chosen],
+                estimated_total_paise=int(subtotal * (1 + _TAX_RATE)) + _DELIVERY_PAISE,
+                reasoning=(
+                    f"{item.name} at {restaurant.name}"
+                    + (f" rated {item.rating:.1f}" if item.has_rating else "")
+                    + f", {restaurant.distance_km}km away.{rejected}"
+                ),
+                injection_detected=restaurant.risk_score > 0,
+                injection_notes="; ".join(restaurant.risk_reasons),
+                backend=self.name, matched_intent=True,
+            )
+
+        if poor:
+            # The dish exists nearby but only badly reviewed. Do not serve it silently.
+            worst = min(poor, key=lambda pair: pair[1].rating or 0.0)
+            suggestion = (
+                f"The {', '.join(wanted)} near you is poorly reviewed "
+                f"({worst[1].name} at {worst[0].name} is rated {worst[1].rating:.1f} "
+                f"from {worst[1].rating_count} reviews), and nowhere better is in range."
+            )
+            rejected = frozenset(i.variant_id for _, i in poor)
+            fallback = self._fallback_with_suggestion(
+                gap=gap, profile=profile, candidates=candidates,
+                budget_paise=budget_paise, suggestion=suggestion, blocked=blocked,
+                exclude=rejected,
+            )
+            if fallback is not None:
+                fallback.rejected_variants = sorted(rejected)
+            return fallback
+
+        return self._fallback_with_suggestion(
+            gap=gap, profile=profile, candidates=candidates, budget_paise=budget_paise,
+            suggestion=f"No {', '.join(wanted)} available nearby within budget.",
+            blocked=blocked,
+        )
+
+    def _fallback_with_suggestion(
+        self, *, gap: ScheduleGap, profile: PreferenceProfile,
+        candidates: list[tuple[Restaurant, list[MenuItem]]], budget_paise: int,
+        suggestion: str, blocked: set[str], exclude: frozenset[str] = frozenset(),
+    ) -> Selection | None:
+        """Best available alternative, clearly marked as not what was asked for."""
+        best = self._score_without_intent(
+            gap=gap, profile=profile, candidates=candidates,
+            budget_paise=budget_paise, blocked=blocked, exclude=exclude,
+        )
+        if best is None:
+            # Nothing else is suitable either. Say so plainly rather than inventing an
+            # alternative that does not exist.
+            return Selection(
+                res_id=0, restaurant_name="", matched_intent=False,
+                suggestion=f"{suggestion} Nothing else nearby fits either.",
+                backend=self.name,
+            )
+        best.matched_intent = False
+        names = ", ".join(i["name"] for i in best.items) or best.restaurant_name
+        best.suggestion = (
+            f"{suggestion} {names} from {best.restaurant_name} instead?"
+        )
+        return best
 
     @staticmethod
     def _pick_items(
         menu: list[MenuItem], dish_rank: dict[str, int], budget_paise: int
     ) -> tuple[list[MenuItem], int]:
-        """Greedy: best-liked affordable main, then a cheap extra if budget allows."""
+        """Greedy: best-liked affordable main, then an extra if the budget allows.
+
+        Mains are ordered ahead of sides and drinks. Ranking purely on preference and
+        price made a Rs60 raita the cheapest thing on the menu and therefore lunch --
+        technically optimal, obviously wrong.
+        """
         ordered = sorted(
             menu,
-            key=lambda m: (-dish_rank.get(m.name.lower(), 0), m.risk_score, m.price_paise),
+            key=lambda m: (
+                1 if any(c in m.category.lower() for c in _SIDE_CATEGORIES) else 0,
+                -dish_rank.get(m.name.lower(), 0),
+                m.risk_score,
+                m.price_paise,
+            ),
         )
         chosen: list[MenuItem] = []
         subtotal = 0
@@ -234,6 +448,14 @@ class DeterministicPlanner:
             subtotal += item.price_paise
             if len(chosen) >= 2:
                 break
+
+        # A meal has to contain a meal. If the only affordable things here are sides and
+        # drinks, this restaurant cannot serve the slot -- offering a raita as lunch is
+        # not a smaller version of the right answer, it is the wrong answer.
+        if not any(
+            not any(c in m.category.lower() for c in _SIDE_CATEGORIES) for m in chosen
+        ):
+            return [], 0
         return chosen, subtotal
 
 
@@ -256,14 +478,17 @@ class GeminiPlanner:
     async def select(
         self, *, gap: ScheduleGap, profile: PreferenceProfile,
         candidates: list[tuple[Restaurant, list[MenuItem]]], budget_paise: int,
+        intent: DishIntent | None = None, min_dish_rating: float = 3.5,
     ) -> Selection | None:
         from google.genai import types
 
         valid_variants = {
             m.variant_id: (r.res_id, m) for r, menu in candidates for m in menu
         }
+        wanted = intent.describe() if intent and not intent.empty else ""
         prompt = build_selection_prompt(
-            profile=profile.to_prompt_block(),
+            profile=(profile.to_prompt_block()
+                     + (f"\nThe schedule asks for: {wanted}" if wanted else "")),
             gap_description=gap.describe(),
             slot=gap.slot,
             budget_rupees=budget_paise / 100.0,
@@ -290,7 +515,9 @@ class GeminiPlanner:
             # produces a valid order, so an LLM outage degrades quality, not uptime.
             log.warning("gemini pool exhausted, falling back", extra={"error": str(exc)})
             return await self._fallback.select(
-                gap=gap, profile=profile, candidates=candidates, budget_paise=budget_paise
+                gap=gap, profile=profile, candidates=candidates,
+                budget_paise=budget_paise, intent=intent,
+                min_dish_rating=min_dish_rating,
             )
         finally:
             REGISTRY.record_ns("planner.gemini.select", now_ns() - start)
@@ -299,13 +526,17 @@ class GeminiPlanner:
         if violations:
             log.error("gemini output failed egress scan", extra={"violations": violations})
             return await self._fallback.select(
-                gap=gap, profile=profile, candidates=candidates, budget_paise=budget_paise
+                gap=gap, profile=profile, candidates=candidates,
+                budget_paise=budget_paise, intent=intent,
+                min_dish_rating=min_dish_rating,
             )
 
         data = _parse_json(raw)
         if not data:
             return await self._fallback.select(
-                gap=gap, profile=profile, candidates=candidates, budget_paise=budget_paise
+                gap=gap, profile=profile, candidates=candidates,
+                budget_paise=budget_paise, intent=intent,
+                min_dish_rating=min_dish_rating,
             )
 
         # Re-ground every identifier against the real catalogue. The model does not get
@@ -333,7 +564,9 @@ class GeminiPlanner:
             )
         if not items or res_id is None:
             return await self._fallback.select(
-                gap=gap, profile=profile, candidates=candidates, budget_paise=budget_paise
+                gap=gap, profile=profile, candidates=candidates,
+                budget_paise=budget_paise, intent=intent,
+                min_dish_rating=min_dish_rating,
             )
 
         chosen_restaurant = next((r for r, _ in candidates if r.res_id == res_id), None)
