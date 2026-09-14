@@ -213,6 +213,39 @@ function stateTag(state) {
   return `<span class="tag ${cls}">${esc(label)}</span>`;
 }
 
+/* Placing an order is not the same as paying for it. With UPI the user still has to
+ * approve a collect request in their own app, and until they do, no food is coming.
+ * Saying "Ordered!" and stopping there would be a lie by omission. */
+function renderPayment(run) {
+  const p = run && run.payment;
+  if (!p || p.settled || !p.needs_user) return '';
+  const link = p.action_url
+    ? `<div style="margin-top:10px"><a class="btn sm" href="${esc(p.action_url)}">Open your UPI app</a></div>`
+    : '';
+  return `
+    <div class="approval" style="margin-top:14px">
+      <div style="font-weight:600">Waiting for your approval</div>
+      <div class="why">${esc(p.message)}</div>
+      ${link}
+      <div class="actions" style="margin-top:10px">
+        <button class="btn ghost sm" data-track="${esc(p.order_id)}">Check status</button>
+      </div>
+    </div>`;
+}
+
+function wirePaymentActions(host) {
+  host.querySelectorAll('[data-track]').forEach((b) =>
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      try {
+        const st = await api(`/api/orders/${encodeURIComponent(b.dataset.track)}/track`);
+        toast(st.message, !st.settled);
+        if (st.settled) await refresh();
+      } catch (err) { toast(err.message, true); }
+      b.disabled = false;
+    }));
+}
+
 function renderLastRun(run) {
   if (!run) { $('#lastRunHost').innerHTML = ''; return; }
   const dishes = (run.dishes || []).map(esc).join(', ');
@@ -812,7 +845,9 @@ async function placeOrder(force) {
       method: 'POST', body: JSON.stringify({ force: !!force }),
     });
     const messages = {
-      order_placed: `Ordered from ${run.restaurant}.`,
+      order_placed: (run.payment && run.payment.needs_user)
+        ? run.payment.message
+        : `Ordered from ${run.restaurant}.`,
       simulated: `Dry run: would order ${rupees(run.amount_rupees)} from ${run.restaurant}.`,
       awaiting_approval: 'Needs your approval — see the card above.',
       rejected: run.escalation_reason || 'Nothing suitable found.',

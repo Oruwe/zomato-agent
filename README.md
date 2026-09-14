@@ -384,6 +384,7 @@ app/
   integrations/
     mcp_client.py        live MCP sessions: pooling, reconnect, error surfacing
     zomato_auth.py       per-user account linking: phone -> OTP -> saved address
+    payment_status.py    did the order actually get paid for? defensive parsing
     zomato_mcp.py        search/menu/cart/checkout, TTL cache, ingress sanitisation
     calendar_mcp.py      schedule reader and meal-gap interval arithmetic
     mocks/fixtures.py    offline catalogue — two fixtures carry live injection payloads

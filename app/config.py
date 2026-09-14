@@ -61,6 +61,15 @@ class Settings(BaseSettings):
 
     # ---- money / wallet --------------------------------------------------------
     payment_rail: PaymentRailName = "mock"
+    # Whether the agent ALSO debits its own payment rail on each order.
+    #
+    # These are two different things and conflating them is a real modelling error:
+    # `zomato_settlement_type` is how *Zomato* collects from the user (it is the merchant
+    # of record), while this flag is whether *we* additionally move money on our own rail.
+    # For an ordinary Zomato order the answer is no -- Zomato collects, we do not -- so a
+    # standing mandate is irrelevant and requiring one would block real orders for no
+    # reason. Turn this on only when the agent is genuinely the one debiting.
+    agent_debits_rail: bool = False
     # Which Zomato-side rail the wallet settles through. Zomato's MCP accepts only
     # `upi` or `cash_on_delivery`; the wallet authorises, this rail executes.
     zomato_settlement_type: ZomatoPaymentType = "upi"

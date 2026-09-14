@@ -23,6 +23,7 @@ from app.core.memory import UserMemory
 from app.core.planner import Selection, make_planner
 from app.core.state import AgentRun, OrderState
 from app.integrations.calendar_mcp import MEAL_WINDOWS, ScheduleGap, ScheduleReader
+from app.integrations.payment_status import OrderPaymentState, parse_checkout
 from app.integrations.zomato_mcp import MenuItem, Restaurant, ZomatoClient, ZomatoError
 from app.observability.latency import now_ns
 from app.observability.logger import get_logger, new_trace_id, trace_id_var
@@ -398,14 +399,14 @@ class FoodOrderingAgent:
                        {"simulated": True, "reason": run.escalation_reason})
             return
 
-        # Cash on delivery moves no money now -- the user pays the rider -- so there is
-        # no rail leg at all. This is the only genuinely zero-touch settlement available
-        # through Zomato's MCP today.
-        cod = s.zomato_settlement_type == "cash_on_delivery"
+        # Zomato is the merchant of record: for both `upi` and `cash_on_delivery` it
+        # collects from the user itself, and the agent moves no money of its own. The
+        # rail leg runs only when the agent is explicitly configured to debit as well.
+        debits_own_rail = s.agent_debits_rail and self.d.rail is not None
 
-        # Live path. Charge the rail first so a wallet commit always has a payment behind
-        # it, then place the order, then make the spend permanent.
-        if self.d.rail is not None and not cod:
+        # Charge the rail first so a wallet commit always has a payment behind it, then
+        # place the order, then make the spend permanent.
+        if debits_own_rail:
             mandate, reason = self._mandate_for(run, cart.total_paise)
             if mandate is None:
                 # No standing authorisation covering this amount: the agent may not move
@@ -456,13 +457,23 @@ class FoodOrderingAgent:
             run.record("checkout", False, {"error": str(exc)})
             return
 
+        outcome = parse_checkout(order, payment_type=s.zomato_settlement_type)
+        if outcome.state == OrderPaymentState.FAILED:
+            self.d.wallet.release(hold.hold_id)
+            run.state = OrderState.FAILED
+            run.error = outcome.message
+            run.record("checkout", False, {"payment": outcome.to_dict()})
+            return
+
         self.d.wallet.commit(hold.hold_id)
         run.transition(OrderState.ORDER_PLACED)
-        run.order_id = str(order.get("order_id", ""))
+        run.order_id = outcome.order_id or str(order.get("order_id", ""))
+        run.payment = outcome.to_dict()
         self.d.memory.record_order(
             restaurant=selection.restaurant_name, dishes=selection.dish_names,
             cuisines=selection.cuisines, amount_paise=cart.total_paise,
             meal_slot=gap.slot, simulated=False,
         )
         run.record("checkout", True,
-                   {"order_id": run.order_id, "amount_paise": cart.total_paise})
+                   {"order_id": run.order_id, "amount_paise": cart.total_paise,
+                    "payment": outcome.to_dict()})

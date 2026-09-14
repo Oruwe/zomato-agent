@@ -45,6 +45,7 @@ class StoredRun:
     amount_paise: int = 0
     order_id: str | None = None
     cart_id: str | None = None
+    payment: dict[str, Any] = field(default_factory=dict)
     res_id: int | None = None
     dry_run: bool = True
     escalation_reason: str | None = None
@@ -101,6 +102,7 @@ class RunStore:
             amount_paise=run.amount_paise,
             order_id=run.order_id,
             cart_id=run.cart_id,
+            payment=dict(getattr(run, "payment", {}) or {}),
             res_id=getattr(run, "res_id", None),
             dry_run=run.dry_run,
             escalation_reason=run.escalation_reason,

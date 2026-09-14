@@ -41,7 +41,9 @@ from app.deps import (
     zomato_auth,
 )
 from app.integrations.calendar_mcp import ScheduleReader
+from app.integrations.payment_status import parse_tracking
 from app.integrations.zomato_auth import LoginError
+from app.integrations.zomato_mcp import ZomatoClient, ZomatoError
 from app.observability.latency import REGISTRY
 from app.observability.logger import configure_logging, get_logger, new_trace_id
 from app.runtime import runtime_for
@@ -445,6 +447,7 @@ async def api_run(body: RunRequest, user: str = Depends(current_user)) -> dict[s
         "restaurant": run.restaurant, "dishes": run.dishes,
         "amount_rupees": run.amount_paise / 100.0, "order_id": run.order_id,
         "dry_run": run.dry_run, "escalation_reason": run.escalation_reason,
+        "payment": run.payment,
         "injection_events": run.injection_events, "error": run.error,
         "steps": [
             {"step": s.step, "ok": s.ok, "detail": s.detail, "elapsed_us": s.elapsed_us}
@@ -468,6 +471,40 @@ async def get_run(run_id: str, user: str = Depends(current_user)) -> dict[str, A
     if stored is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "run not found")
     return stored.to_dict()
+
+
+@app.get("/api/orders/{order_id}/track", tags=["agent"])
+async def track_order(order_id: str, user: str = Depends(current_user)) -> dict[str, Any]:
+    """Confirm whether an order is actually paid for and on its way.
+
+    With UPI settlement the order exists before the money moves, so "placed" is not the
+    same as "coming". This is how the dashboard finds out which.
+    """
+    s = get_settings()
+    client = ZomatoClient(s, mcp_session=zomato_auth(s).session_for(user))
+    try:
+        raw = await client.track_order(order_id)
+    except ZomatoError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    return parse_tracking(raw, payment_type=s.zomato_settlement_type).to_dict()
+
+
+@app.post("/api/orders/{order_id}/simulate-approval", tags=["agent"],
+          dependencies=[Depends(require_csrf)])
+async def simulate_approval(order_id: str, user: str = Depends(current_user)) -> dict[str, Any]:
+    """Stand in for the user approving the UPI collect. Mock mode only.
+
+    Refused outside mock mode: pretending a real payment succeeded would make the
+    dashboard lie about whether food is coming.
+    """
+    s = get_settings()
+    if not s.use_mocks:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Approval happens in your UPI app; it cannot be simulated against live Zomato.",
+        )
+    ZomatoClient(s).mock_approve(order_id)
+    return {"ok": True}
 
 
 @app.get("/api/approvals", tags=["agent"])

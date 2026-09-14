@@ -359,8 +359,10 @@ def mandate_status(settings: Settings | None = None, *, user_id: str = DEFAULT_U
     mandate = rt.mandates.get(user_id)
     return {
         "settlement": s.zomato_settlement_type,
-        # Cash on delivery needs no standing authorisation: no money moves at order time.
-        "needs_mandate": s.zomato_settlement_type != "cash_on_delivery",
+        # A mandate governs the agent debiting its own rail. Zomato collects from the
+        # user itself, so an ordinary order -- upi or cash -- needs no standing consent.
+        "needs_mandate": s.agent_debits_rail,
+        "agent_debits_rail": s.agent_debits_rail,
         "rail": s.payment_rail,
         "mandate": mandate.to_dict() if mandate else None,
         "upi_circle_cap_rupees": UPI_CIRCLE_MONTHLY_CAP_PAISE / 100.0,

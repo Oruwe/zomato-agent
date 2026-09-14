@@ -25,6 +25,10 @@ from app.security.guardrails import sanitize
 
 log = get_logger(__name__)
 
+# Orders awaiting a simulated UPI approval, so the mock can model the one step that
+# decides whether food actually arrives.
+MOCK_PENDING: set[str] = set()
+
 __all__ = ["ZomatoClient", "Restaurant", "MenuItem", "Cart", "ZomatoError"]
 
 
@@ -230,13 +234,22 @@ class ZomatoClient:
             cart = MOCK_CARTS.get(cart_id)
             if cart is None:
                 raise ZomatoError(f"unknown cart {cart_id!r}")
-            return {
-                "order_id": f"ord_mock_{uuid.uuid4().hex[:10]}",
-                "status": "placed",
-                "total_paise": cart["total_paise"],
-                "res_id": cart["res_id"],
-                "mock": True,
-            }
+            order_id = f"ord_mock_{uuid.uuid4().hex[:10]}"
+            # Mirror the real rails: cash is placed outright, UPI sends a collect request
+            # the user must approve. A mock that always says "placed" would hide the one
+            # step that actually decides whether food arrives.
+            if payment_method_type == "cash_on_delivery":
+                payload = {"order_id": order_id, "status": "placed"}
+            else:
+                payload = {
+                    "order_id": order_id,
+                    "status": "payment_pending",
+                    "upi_intent": f"upi://pay?tr={order_id}&am={cart['total_paise'] / 100:.2f}",
+                }
+                MOCK_PENDING.add(order_id)
+            payload |= {"total_paise": cart["total_paise"], "res_id": cart["res_id"],
+                        "mock": True}
+            return payload
         raw = await self._call(
             "checkout_cart", {"cart_id": cart_id, "payment_method_type": payment_method_type}
         )
@@ -244,6 +257,21 @@ class ZomatoClient:
         # Without unwrapping here a real order is placed but its id is lost, leaving the
         # user charged for an order the system cannot track.
         return _node(raw)
+
+    async def track_order(self, order_id: str) -> dict:
+        """Current state of an order, used to confirm a payment actually landed."""
+        if self.use_mocks:
+            if order_id in MOCK_PENDING:
+                return {"orders": [{"order_id": order_id, "status": "payment_pending"}]}
+            return {"orders": [{"order_id": order_id, "status": "confirmed",
+                                "rider": {"name": "Demo rider"}}]}
+        return await self._call("get_order_tracking_info", {"order_id": order_id})
+
+    def mock_approve(self, order_id: str) -> bool:
+        """Stand in for the user approving the UPI collect. Mock mode only."""
+        if not self.use_mocks:
+            return False
+        return MOCK_PENDING.discard(order_id) is None
 
     # -- internals --------------------------------------------------------------
     async def _call(self, tool: str, args: dict) -> dict:

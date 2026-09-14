@@ -44,6 +44,10 @@ def _settings(tmp_path, **over) -> Settings:
         allow_autonomous_checkout=True, max_per_order_inr=1000,
         daily_cap_inr=5000, monthly_cap_inr=15000, human_approval_above_inr=1000,
         zomato_settlement_type="upi",
+        # These tests are about the agent debiting its own rail, which is the only
+        # situation a mandate governs. An ordinary Zomato order needs no mandate:
+        # Zomato is the merchant and collects from the user itself.
+        agent_debits_rail=True,
     )
     base.update(over)
     return Settings(**base)
@@ -79,9 +83,21 @@ async def test_mandate_enables_unattended_payment(tmp_path) -> None:
     assert mandate.debited_paise == run.amount_paise
 
 
+async def test_ordinary_zomato_order_needs_no_mandate(tmp_path) -> None:
+    """Zomato collects from the user, so the agent debits nothing and needs no consent.
+
+    Requiring a mandate here was a modelling error: it conflated how Zomato collects
+    with whether the agent moves money of its own, and would have blocked real orders.
+    """
+    s = _settings(tmp_path, agent_debits_rail=False)
+    run = await execute_run(s, user_id="u", slot="lunch", now=NOON)
+    assert run.state is OrderState.ORDER_PLACED, run.escalation_reason or run.error
+
+
 async def test_cash_on_delivery_needs_no_mandate(tmp_path) -> None:
     """COD moves no money at order time, so there is nothing to pre-authorise."""
-    s = _settings(tmp_path, zomato_settlement_type="cash_on_delivery")
+    s = _settings(tmp_path, zomato_settlement_type="cash_on_delivery",
+                  agent_debits_rail=False)
     run = await execute_run(s, user_id="u", slot="lunch", now=NOON)
 
     assert run.state is OrderState.ORDER_PLACED, run.escalation_reason or run.error
@@ -166,6 +182,7 @@ def client(tmp_path, monkeypatch):
         "USE_MOCKS": "true", "DRY_RUN": "false", "ALLOW_AUTONOMOUS_CHECKOUT": "true",
         "PAYMENT_RAIL": "mock", "GEMINI_API_KEY": "", "APP_PASSWORD": "",
         "MEMORY_PATH": str(tmp_path / "m"), "ZOMATO_SETTLEMENT_TYPE": "upi",
+        "AGENT_DEBITS_RAIL": "true",
         "HUMAN_APPROVAL_ABOVE_INR": "1000", "DAILY_CAP_INR": "5000",
         "RATE_LIMIT_PER_MINUTE": "1000", "RATE_LIMIT_RUN_PER_MINUTE": "1000",
     }.items():

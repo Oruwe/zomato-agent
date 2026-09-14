@@ -74,6 +74,9 @@ class AgentRun:
     injection_events: list[dict[str, Any]] = field(default_factory=list)
     order_id: str | None = None
     cart_id: str | None = None
+    # Placing an order is not the same as it being paid for: with UPI the user still has
+    # to approve a collect request. This records which.
+    payment: dict[str, Any] = field(default_factory=dict)
     amount_paise: int = 0
     restaurant: str | None = None
     res_id: int | None = None
