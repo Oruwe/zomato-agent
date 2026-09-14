@@ -41,7 +41,7 @@ MEAL_WINDOWS: tuple[MealWindow, ...] = (
     MealWindow("breakfast", time(7, 30), time(10, 30), 25, "breakfast idli dosa"),
     MealWindow("lunch", time(12, 0), time(15, 0), 30, "lunch meals biryani"),
     MealWindow("snack", time(16, 0), time(18, 30), 20, "snacks coffee rolls"),
-    MealWindow("dinner", time(19, 0), time(22, 30), 30, "dinner"),
+    MealWindow("dinner", time(19, 0), time(22, 30), 30, "dinner biryani curry rice"),
 )
 
 

@@ -34,7 +34,7 @@ Also available from the terminal:
 python -m app.cli run --slot breakfast   # watch it route around an injected merchant
 python -m app.cli memory                 # what it has learned about you
 python -m app.cli bench                  # control-plane latency profile
-pytest -q                                # 117 tests, incl. µs latency budgets
+pytest -q                                # 146 tests, incl. µs latency budgets
 python -m evals.eval_runner              # red-team corpus + golden workflows
 ```
 
@@ -184,7 +184,7 @@ Two planes, because only one of them can be fast.
 | `wallet.authorize` | 6.18µs | 16.50µs |
 | `guardrails.scan_output` | 6.84µs | 13.53µs |
 | `guardrails.sanitize` | 18.29µs | 45.40µs |
-| `memory.recall` | 30.28µs | 69.89µs |
+| `memory.recall` | 41.04µs | 103.71µs |
 | `calendar.find_gaps` | 46.20µs | 108.67µs |
 
 **Data plane** — Gemini inference and MCP network calls, inherently 10⁵–10⁶ µs. Attacked
@@ -208,6 +208,30 @@ explainability and debuggability, and every resulting decision is auditable.
 Dietary constraints are promoted from preferences into **hard policy rules**: a stated
 allergy becomes `blocked_ingredients` in the policy engine, read live so it applies to the
 very next order.
+
+Two things stop preference learning from collapsing into a rut, both found by simulating
+four days of ordering and watching it buy filter coffee for dinner twelve times:
+
+- **Preferences are normalised, not counted.** Raw counts made the score unbounded — after
+  a dozen orders the incumbent scored ~100 against every rival's single digits, so nothing
+  could ever displace it. Each factor is now scaled to 0–1 and weighted, so preference is
+  a strong nudge rather than a ratchet.
+- **Recent meals are penalised, and preferences are slot-aware.** What you eat for
+  breakfast says little about dinner, so orders from the slot being planned count double
+  and other slots count for a fifth. Over five simulated days the agent now alternates
+  restaurants and learns four cuisines instead of one.
+
+### One meal per slot
+
+The wallet bounds *how much* the agent spends, not *how often*. Three ₹707 lunches are
+individually well inside every cap, so the money layer has no objection — but nobody wants
+three lunches. A double-clicked button, a retried webhook, or a cron tick landing on a
+manual run all produced exactly that (reproduced at 3 orders / ₹2121).
+
+The guard is a domain rule: one order per user, meal date and slot, checked inside the
+per-user lock and before any catalogue fetch, so a duplicate is cheap to refuse. Dry runs
+do not count — they produce no food. A run awaiting approval does. `force=true` (or
+"Order it again anyway" in the UI) is the deliberate override.
 
 ---
 
@@ -299,7 +323,7 @@ evals/
   test_injections.json   26-case corpus, malicious and benign
   test_scenarios.json    golden end-to-end workflows
   bench_hotpath.py       control-plane microbenchmark
-tests/                   117 tests: security, flow, API, concurrency, live MCP,
+tests/                   146 tests: security, flow, API, concurrency, live MCP,
                          LLM pool, latency budgets, deployment config
 ```
 

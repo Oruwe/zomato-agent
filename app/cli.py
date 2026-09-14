@@ -14,7 +14,7 @@ import json
 import sys
 
 from app.config import get_settings
-from app.deps import DEFAULT_USER, build_agent
+from app.deps import DEFAULT_USER, build_agent, execute_run
 from app.observability.latency import REGISTRY
 from app.observability.logger import configure_logging
 
@@ -25,8 +25,9 @@ def _print(obj) -> None:
 
 async def _run(args) -> int:
     settings = get_settings()
-    agent = build_agent(settings, user_id=args.user)
-    run = await agent.run(slot=args.slot)
+    run = await execute_run(
+        settings, user_id=args.user, slot=args.slot, force=args.force
+    )
 
     print("\n" + "=" * 68)
     print(f"  state      : {run.state.value}")
@@ -77,6 +78,8 @@ def main(argv: list[str] | None = None) -> int:
 
     p_run = sub.add_parser("run", help="execute one ordering cycle")
     p_run.add_argument("--slot", choices=["breakfast", "lunch", "snack", "dinner"])
+    p_run.add_argument("--force", action="store_true",
+                       help="order again even if this meal was already ordered today")
     p_run.add_argument("--verbose", action="store_true")
     p_run.add_argument("--latency", action="store_true", help="print latency percentiles")
     p_run.set_defaults(fn=_run)

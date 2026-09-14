@@ -220,6 +220,9 @@ class LoginRequest(BaseModel):
 class RunRequest(BaseModel):
     user_id: str = Field(default=DEFAULT_USER)
     slot: str | None = Field(default=None, pattern="^(breakfast|lunch|snack|dinner)$")
+    # Deliberately order a meal that was already ordered today. Off by default so a
+    # double-clicked button or a retried webhook cannot buy lunch twice.
+    force: bool = False
 
 
 class DecisionRequest(BaseModel):
@@ -373,7 +376,7 @@ async def dashboard_state(user: str = Depends(current_user)) -> dict[str, Any]:
 @app.post("/api/run", tags=["agent"], dependencies=[Depends(require_csrf)])
 async def api_run(body: RunRequest, user: str = Depends(current_user)) -> dict[str, Any]:
     new_trace_id()
-    run = await execute_run(get_settings(), user_id=user, slot=body.slot)
+    run = await execute_run(get_settings(), user_id=user, slot=body.slot, force=body.force)
     return {
         "run_id": run.run_id, "state": run.state.value, "slot": run.slot,
         "restaurant": run.restaurant, "dishes": run.dishes,
@@ -498,7 +501,9 @@ async def schedule_tick(body: RunRequest | None = None) -> dict[str, Any]:
     """Entry point for an external scheduler (Render Cron Job) to drive a cycle."""
     new_trace_id()
     req = body or RunRequest()
-    run = await execute_run(get_settings(), user_id=req.user_id, slot=req.slot)
+    run = await execute_run(
+        get_settings(), user_id=req.user_id, slot=req.slot, force=req.force
+    )
     return {
         "run_id": run.run_id, "state": run.state.value,
         "amount_rupees": run.amount_paise / 100.0, "order_id": run.order_id,

@@ -507,14 +507,16 @@ $$('.inputrow input').forEach((input) => {
 
 /* ---------- run the agent ---------- */
 
-$('#orderBtn').addEventListener('click', async () => {
+async function placeOrder(force) {
   if (busy) return;
   busy = true;
   const btn = $('#orderBtn');
   btn.disabled = true;
   btn.innerHTML = '<span class="spin"></span> Thinking';
   try {
-    const run = await api('/api/run', { method: 'POST', body: JSON.stringify({}) });
+    const run = await api('/api/run', {
+      method: 'POST', body: JSON.stringify({ force: !!force }),
+    });
     const messages = {
       order_placed: `Ordered from ${run.restaurant}.`,
       simulated: `Dry run: would order ${rupees(run.amount_rupees)} from ${run.restaurant}.`,
@@ -525,6 +527,10 @@ $('#orderBtn').addEventListener('click', async () => {
     const bad = run.state === 'failed' || run.state === 'rejected';
     toast(messages[run.state] || run.state, bad);
     renderLastRun(run);
+    // Already ordered this meal: offer a deliberate repeat rather than a dead end.
+    if (run.state === 'rejected' && /already ordered/i.test(run.escalation_reason || '')) {
+      showRepeatOffer(run.escalation_reason);
+    }
     await refresh();
   } catch (err) {
     toast(err.message, true);
@@ -533,7 +539,25 @@ $('#orderBtn').addEventListener('click', async () => {
     btn.disabled = false;
     btn.textContent = 'Order now';
   }
-});
+}
+
+function showRepeatOffer(reason) {
+  const host = $('#lastRunHost');
+  const box = document.createElement('div');
+  box.className = 'approval';
+  box.style.marginTop = '14px';
+  box.innerHTML = `
+    <div style="font-weight:600">Already ordered</div>
+    <div class="why">${esc(reason)}</div>
+    <div class="actions"><button class="btn sm" id="forceBtn">Order it again anyway</button></div>`;
+  host.appendChild(box);
+  box.querySelector('#forceBtn').addEventListener('click', () => {
+    box.remove();
+    placeOrder(true);
+  });
+}
+
+$('#orderBtn').addEventListener('click', () => placeOrder(false));
 
 /* ---------- refresh loop ---------- */
 

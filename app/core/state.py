@@ -79,6 +79,9 @@ class AgentRun:
     res_id: int | None = None
     dishes: list[str] = field(default_factory=list)
     slot: str | None = None
+    # The calendar date this meal is for, which is not always the date the row was
+    # written -- a late dinner run can cross midnight.
+    order_date: str | None = None
     escalation_reason: str | None = None
     error: str | None = None
     dry_run: bool = True

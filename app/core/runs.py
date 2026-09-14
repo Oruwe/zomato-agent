@@ -37,6 +37,7 @@ class StoredRun:
     state: str
     created_at: str
     slot: str | None = None
+    order_date: str | None = None
     restaurant: str | None = None
     dishes: list[str] = field(default_factory=list)
     amount_paise: int = 0
@@ -92,6 +93,7 @@ class RunStore:
             state=run.state.value,
             created_at=_now_local(),
             slot=run.slot,
+            order_date=getattr(run, "order_date", None),
             restaurant=run.restaurant,
             dishes=list(run.dishes),
             amount_paise=run.amount_paise,
@@ -159,6 +161,24 @@ class RunStore:
         if state:
             runs = [r for r in runs if r.state == state]
         return runs[:limit]
+
+    def existing_order_for_slot(self, slot: str, on_date: str) -> StoredRun | None:
+        """An order already placed, or awaiting approval, for this meal slot today.
+
+        Dry runs deliberately do not count: they produce no food, so repeating one is
+        harmless. A run awaiting approval does count -- the user still has a live
+        decision in front of them, and queuing a second identical order is never what
+        they meant.
+        """
+        with self._lock:
+            for run in reversed(self._runs.values()):
+                # Fall back to created_at for rows written before order_date existed.
+                run_date = run.order_date or run.created_at[:10]
+                if run.slot != slot or run_date != on_date:
+                    continue
+                if run.state == "order_placed" or run.approval_status == "pending":
+                    return run
+        return None
 
     def pending_approvals(self) -> list[StoredRun]:
         with self._lock:

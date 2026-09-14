@@ -47,6 +47,8 @@ class AgentDeps:
     policy: PolicyEngine
     memory: UserMemory
     rail: object | None = None
+    # Run history, consulted to avoid ordering the same meal twice.
+    runs: object | None = None
 
 
 class FoodOrderingAgent:
@@ -60,6 +62,7 @@ class FoodOrderingAgent:
         day: date | None = None,
         slot: str | None = None,
         now: datetime | None = None,
+        force: bool = False,
     ) -> AgentRun:
         s = self.d.settings
         trace_id = new_trace_id()
@@ -77,6 +80,8 @@ class FoodOrderingAgent:
             address_id = await self._step_address(run)
             gap = await self._step_schedule(run, day, slot, current)
             if gap is None:
+                return run
+            if not force and self._already_ordered(run, gap, current, day):
                 return run
             budget_paise = self._budget(run)
             candidates = await self._step_candidates(run, address_id, gap, budget_paise)
@@ -152,8 +157,40 @@ class FoodOrderingAgent:
 
         run.transition(OrderState.SLOT_SELECTED)
         run.slot = chosen.slot
+        run.order_date = chosen.start.date().isoformat()
         run.record("select_slot", True, {"slot": chosen.slot, "gap": chosen.describe()})
         return chosen
+
+    def _already_ordered(
+        self, run: AgentRun, gap: ScheduleGap, current: datetime, day: date | None
+    ) -> bool:
+        """Stop a second order for a meal the user has already handled today.
+
+        A double-clicked button, a retried webhook and a cron tick landing on top of a
+        manual run all produce this. The wallet correctly allows each one individually --
+        they are all inside the caps -- so the guard has to live here, in the domain.
+        """
+        store = self.d.runs
+        if store is None:
+            return False
+        on_date = run.order_date or (day or current.date()).isoformat()
+        existing = store.existing_order_for_slot(gap.slot, on_date)
+        if existing is None:
+            return False
+
+        run.state = OrderState.REJECTED
+        run.escalation_reason = (
+            f"{gap.slot} was already ordered today from "
+            f"{existing.restaurant or 'a restaurant'} "
+            f"(₹{existing.amount_paise / 100:.2f}). Use force to order it again."
+        )
+        run.record("duplicate_guard", False,
+                   {"existing_run_id": existing.run_id, "slot": gap.slot,
+                    "existing_state": existing.state})
+        log.info("duplicate order prevented",
+                 extra={"run_id": run.run_id, "slot": gap.slot,
+                        "existing_run_id": existing.run_id})
+        return True
 
     def _budget(self, run: AgentRun) -> int:
         snap = self.d.wallet.snapshot()
@@ -169,7 +206,7 @@ class FoodOrderingAgent:
         self, run: AgentRun, address_id: str, gap: ScheduleGap, budget_paise: int
     ) -> list[tuple[Restaurant, list[MenuItem]]]:
         t = now_ns()
-        profile = self.d.memory.recall()
+        profile = self.d.memory.recall(slot=gap.slot)
         keyword = gap.keyword
         if profile.top_cuisines:
             keyword = f"{profile.top_cuisines[0][0]} {gap.keyword}"
@@ -216,7 +253,7 @@ class FoodOrderingAgent:
         t = now_ns()
         planner = make_planner(self.d.settings, canary=canary, nonce=nonce)
         selection = await planner.select(
-            gap=gap, profile=self.d.memory.recall(),
+            gap=gap, profile=self.d.memory.recall(slot=gap.slot),
             candidates=candidates, budget_paise=budget_paise,
         )
         if selection is None:
@@ -321,8 +358,8 @@ class FoodOrderingAgent:
             )
             self.d.memory.record_order(
                 restaurant=selection.restaurant_name, dishes=selection.dish_names,
-                cuisines=[], amount_paise=cart.total_paise, meal_slot=gap.slot,
-                simulated=True,
+                cuisines=selection.cuisines, amount_paise=cart.total_paise,
+                meal_slot=gap.slot, simulated=True,
             )
             run.record("checkout", True,
                        {"simulated": True, "reason": run.escalation_reason})
@@ -363,8 +400,8 @@ class FoodOrderingAgent:
         run.order_id = str(order.get("order_id", ""))
         self.d.memory.record_order(
             restaurant=selection.restaurant_name, dishes=selection.dish_names,
-            cuisines=[], amount_paise=cart.total_paise, meal_slot=gap.slot,
-            simulated=False,
+            cuisines=selection.cuisines, amount_paise=cart.total_paise,
+            meal_slot=gap.slot, simulated=False,
         )
         run.record("checkout", True,
                    {"order_id": run.order_id, "amount_paise": cart.total_paise})

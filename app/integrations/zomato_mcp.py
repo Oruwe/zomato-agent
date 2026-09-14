@@ -310,6 +310,12 @@ class ZomatoClient:
             if score or not terms:
                 scored.append((score, r))
         scored.sort(key=lambda p: (-p[0], -p[1]["rating"]))
+        matched = [r for score, r in scored if score]
+        if matched:
+            return matched[:page_size]
+        # Nothing matched the keyword. The live API falls back to nearby recommended
+        # restaurants rather than returning nothing, so the mock does too -- otherwise a
+        # weak keyword looks identical to "there is no food near you".
         return [r for _, r in scored[:page_size]]
 
 

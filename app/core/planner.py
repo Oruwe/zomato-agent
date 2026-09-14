@@ -39,11 +39,54 @@ __all__ = ["Selection", "Planner", "DeterministicPlanner", "GeminiPlanner", "mak
 _DELIVERY_PAISE = 3500
 _TAX_RATE = 0.05
 
+# Scoring weights. Every term is normalised to 0..1 before weighting, so each factor
+# contributes a bounded, comparable number of points.
+#
+# Raw preference *counts* were used here originally, which made the score unbounded: after
+# a dozen orders the incumbent scored ~100 while every competitor scored single digits, so
+# no amount of variety penalty could ever dislodge it and the user ate the same meal every
+# day. Normalising turns preference into a strong nudge instead of a ratchet.
+_W_RATING = 2.0      # 0..10 -- quality still dominates, as it should
+_W_CUISINE = 4.0
+_W_RESTAURANT = 3.0
+_W_DISH = 3.0
+_W_RISK = 3.0        # per point of injection score; deliberately unbounded
+# Deduction for the most recent order, decaying as 1/n over older ones. Comparable to the
+# affinity terms, so a favourite returns after a couple of other meals rather than being
+# exiled permanently.
+_VARIETY_PENALTY = 5.0
+_VARIETY_CAP = 10.0
+
+
+def _recency_penalty(recent: list[str]) -> dict[str, float]:
+    """Penalty per name from a most-recent-first list of recent orders.
+
+    Contributions accumulate across repeats and decay as 1/n with age, then cap. A dict
+    comprehension was used here originally, which silently kept only the *last*
+    occurrence of a repeated name -- so the worst offender, appearing at every index,
+    received the weakest penalty of them all and nothing ever dislodged it.
+    """
+    penalty: dict[str, float] = {}
+    for i, name in enumerate(recent):
+        key = name.lower()
+        penalty[key] = penalty.get(key, 0.0) + _VARIETY_PENALTY / (i + 1)
+    # Cap so a long-standing favourite is rested, not exiled.
+    return {k: min(v, _VARIETY_CAP) for k, v in penalty.items()}
+
+
+def _normalise(ranked: list[tuple[str, int]]) -> dict[str, float]:
+    """Map preference counts onto 0..1 by share of the strongest preference."""
+    if not ranked:
+        return {}
+    top = max(n for _, n in ranked) or 1
+    return {name.lower(): n / top for name, n in ranked}
+
 
 @dataclass(slots=True)
 class Selection:
     res_id: int
     restaurant_name: str
+    cuisines: list[str] = field(default_factory=list)
     items: list[dict[str, Any]] = field(default_factory=list)
     estimated_total_paise: int = 0
     reasoning: str = ""
@@ -87,9 +130,14 @@ class DeterministicPlanner:
             blocked = {b.lower() for b in profile.dietary_constraints} | {
                 d.lower() for d in profile.disliked
             }
-            cuisine_rank = {c.lower(): n for c, n in profile.top_cuisines}
-            dish_rank = {d.lower(): n for d, n in profile.top_dishes}
-            res_rank = {r.lower(): n for r, n in profile.top_restaurants}
+            cuisine_rank = _normalise(profile.top_cuisines)
+            dish_rank = _normalise(profile.top_dishes)
+            res_rank = _normalise(profile.top_restaurants)
+            # Most recent order carries the largest penalty, decaying with age, and
+            # repeats accumulate: eating somewhere 6 of the last 6 times should count
+            # against it far more than eating there once.
+            res_penalty = _recency_penalty(profile.recent_restaurants)
+            dish_penalty = _recency_penalty(profile.recent_dishes)
 
             best: tuple[float, Restaurant, list[MenuItem], int] | None = None
             for restaurant, menu in candidates:
@@ -106,10 +154,20 @@ class DeterministicPlanner:
                     continue
 
                 score = 0.0
-                score += restaurant.rating * 2.0
-                score += sum(cuisine_rank.get(c.lower(), 0) for c in restaurant.cuisines) * 1.5
-                score += res_rank.get(restaurant.name.lower(), 0) * 2.0
-                score += sum(dish_rank.get(m.name.lower(), 0) for m in chosen) * 1.5
+                score += restaurant.rating * _W_RATING
+                # Best-matching cuisine, not the sum: a restaurant listing five cuisines
+                # should not outscore a better one listing the single right cuisine.
+                cuisine_fit = max(
+                    (cuisine_rank.get(c.lower(), 0.0) for c in restaurant.cuisines),
+                    default=0.0,
+                )
+                score += cuisine_fit * _W_CUISINE
+                score += res_rank.get(restaurant.name.lower(), 0.0) * _W_RESTAURANT
+                dish_fit = (
+                    sum(dish_rank.get(m.name.lower(), 0.0) for m in chosen) / len(chosen)
+                    if chosen else 0.0
+                )
+                score += dish_fit * _W_DISH
                 # Time pressure: a short gap favours fast delivery.
                 if restaurant.eta_minutes and gap.minutes:
                     if restaurant.eta_minutes > gap.minutes:
@@ -117,8 +175,13 @@ class DeterministicPlanner:
                     else:
                         score += max(0.0, (gap.minutes - restaurant.eta_minutes) / 15.0)
                 # Merchants whose own text tried to manipulate us are penalised hard.
-                score -= restaurant.risk_score * 3.0
+                score -= restaurant.risk_score * _W_RISK
                 score -= sum(m.risk_score for m in chosen) * 2.0
+                # Variety: recently eaten is less appealing, however well it scores.
+                score -= res_penalty.get(restaurant.name.lower(), 0.0)
+                score -= max(
+                    (dish_penalty.get(m.name.lower(), 0.0) for m in chosen), default=0.0
+                ) * 0.5
 
                 if best is None or score > best[0]:
                     best = (score, restaurant, chosen, subtotal)
@@ -130,6 +193,7 @@ class DeterministicPlanner:
             return Selection(
                 res_id=restaurant.res_id,
                 restaurant_name=restaurant.name,
+                cuisines=list(restaurant.cuisines),
                 items=[
                     {"variant_id": m.variant_id, "name": m.name, "quantity": 1,
                      "_ingredients": m.ingredients}
@@ -272,13 +336,15 @@ class GeminiPlanner:
                 gap=gap, profile=profile, candidates=candidates, budget_paise=budget_paise
             )
 
-        name = next((r.name for r, _ in candidates if r.res_id == res_id), str(res_id))
+        chosen_restaurant = next((r for r, _ in candidates if r.res_id == res_id), None)
+        name = chosen_restaurant.name if chosen_restaurant else str(res_id)
         subtotal = sum(
             valid_variants[i["variant_id"]][1].price_paise * i["quantity"] for i in items
         )
         return Selection(
             res_id=res_id,
             restaurant_name=name,
+            cuisines=list(chosen_restaurant.cuisines) if chosen_restaurant else [],
             items=items,
             estimated_total_paise=int(subtotal * (1 + _TAX_RATE)) + _DELIVERY_PAISE,
             reasoning=str(data.get("reasoning", ""))[:400],

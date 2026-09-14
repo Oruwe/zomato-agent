@@ -106,6 +106,7 @@ def build_agent(
             policy=rt.policy,
             memory=rt.memory,
             rail=build_rail(s),
+            runs=rt.runs,
         )
     )
 
@@ -117,13 +118,18 @@ async def execute_run(
     slot: str | None = None,
     day: date | None = None,
     now: datetime | None = None,
+    force: bool = False,
     zomato_session=None,
     calendar_session=None,
 ) -> AgentRun:
     """Run the agent under the per-user lock and persist the result.
 
     The lock is what makes concurrent requests safe: without it two callers can both
-    pass the budget check before either commits.
+    pass the budget check before either commits. Persisting *inside* the lock matters
+    too -- the duplicate guard reads run history, so a concurrent caller must be able
+    to see the previous run's outcome when it takes its turn.
+
+    ``force=True`` bypasses the duplicate guard for a deliberate repeat order.
     """
     s = settings or get_settings()
     rt = runtime_for(s, user_id)
@@ -131,8 +137,8 @@ async def execute_run(
         s, user_id=user_id, zomato_session=zomato_session, calendar_session=calendar_session
     )
     async with rt.lock:
-        run = await agent.run(user_id=user_id, slot=slot, day=day, now=now)
-    rt.runs.save(run)
+        run = await agent.run(user_id=user_id, slot=slot, day=day, now=now, force=force)
+        rt.runs.save(run)
     return run
 
 
