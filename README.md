@@ -582,7 +582,7 @@ addresses, API keys and canary tokens before anything is emitted.
 ## Layout
 
 ```
-agent.yml                declarative contract, asserted against the code by tests
+agent.yaml               declarative contract, asserted against the code by tests
 SOUL.md                  what the agent is, and what it is not
 EXPLAINABILITY.md        how it decides, what it reads, what it cannot do
 app/

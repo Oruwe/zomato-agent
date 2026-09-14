@@ -1,8 +1,8 @@
-"""agent.yml is a contract, not a description.
+"""agent.yaml is a contract, not a description.
 
 A manifest nobody checks is documentation cosplay: it says the agent may call seven
 tools while the code quietly allows an eighth, and the file is worse than useless
-because it is believed. These tests assert every claim in agent.yml against the code
+because it is believed. These tests assert every claim in agent.yaml against the code
 that enforces it, so the two cannot drift apart without CI noticing.
 """
 
@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture(scope="module")
 def manifest() -> dict:
-    return yaml.safe_load((ROOT / "agent.yml").read_text(encoding="utf-8"))
+    return yaml.safe_load((ROOT / "agent.yaml").read_text(encoding="utf-8"))
 
 
 @pytest.fixture(scope="module")
@@ -184,7 +184,7 @@ def test_schedule_matches_the_deployed_cron_jobs(manifest: dict) -> None:
 
     for trigger in manifest["schedule"]["triggers"]:
         name = f"tick-{trigger['slot']}"
-        assert name in crons, f"{name} is declared in agent.yml but not deployed"
+        assert name in crons, f"{name} is declared in agent.yaml but not deployed"
         hour, minute = (int(p) for p in trigger["at"].split(":"))
         utc_minutes = (hour * 60 + minute - (5 * 60 + 30)) % (24 * 60)
         cron_min, cron_hour = crons[name].split()[:2]
@@ -204,15 +204,15 @@ def test_blueprint_caps_do_not_exceed_the_manifest(manifest: dict) -> None:
                           ("MONTHLY_CAP_INR", caps["monthly"]),
                           ("HUMAN_APPROVAL_ABOVE_INR", caps["human_approval_above"])):
         assert float(env[key]) <= float(declared), \
-            f"{key}={env[key]} in render.yaml exceeds the {declared} declared in agent.yml"
+            f"{key}={env[key]} in render.yaml exceeds the {declared} declared in agent.yaml"
 
 
 def test_manifest_names_secrets_without_carrying_any(manifest: dict) -> None:
-    raw = (ROOT / "agent.yml").read_text(encoding="utf-8")
+    raw = (ROOT / "agent.yaml").read_text(encoding="utf-8")
     assert manifest["secrets"], "the manifest should name the credentials it needs"
     for name in manifest["secrets"]:
         assert f"{name}=" not in raw and f"{name}:" not in raw, \
-            f"{name} looks like it carries a value in agent.yml"
+            f"{name} looks like it carries a value in agent.yaml"
 
 
 def test_the_companion_documents_exist(manifest: dict) -> None:
