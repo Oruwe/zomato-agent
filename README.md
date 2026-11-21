@@ -34,7 +34,7 @@ Also available from the terminal:
 python -m app.cli run --slot breakfast   # watch it route around an injected merchant
 python -m app.cli memory                 # what it has learned about you
 python -m app.cli bench                  # control-plane latency profile
-pytest -q                                # 372 tests, incl. µs latency budgets
+pytest -q                                # 385 tests, incl. µs latency budgets
 pytest -q -m "not ui"                    # skip the browser tests (no Chromium needed)
 python -m evals.eval_runner              # red-team corpus + golden workflows
 ```
@@ -149,16 +149,22 @@ sanitiser as restaurant and calendar text.
 
 ## The dashboard
 
-Five views, no build step — vanilla JS and CSS served by the same container as the API,
-under a strict CSP with no external origins.
+Six views, no build step — vanilla JS and CSS served by the same container as the API,
+under a strict CSP with no external origins. Two columns on a desktop, one on a phone, and
+light or dark following the system setting.
 
 | View | What it answers |
 |---|---|
-| **Today** | What am I eating and by when, what is the agent about to do, and does anything need me? |
-| **Orders** | What did it order, and *why* — every run expands into its full audit trail |
-| **Wallet** | How much of my envelope is left today and this month |
-| **Security** | What tried to manipulate my agent, and what is currently guarding it |
-| **Taste** | Hard dietary rules (enforced as policy) and soft preferences |
+| **Today** | What am I eating and by when, how will it be paid, and does anything need me? Stat tiles, a strip of the whole day (busy, meal windows, planned arrivals, *now*), and the settlement ladder for the next order |
+| **Orders** | What did it order, and *why* — every run expands into a plain-language account of each step, including the settlement rungs it tried. Filter by outcome; "hands-free" counts orders placed with no approval step |
+| **Wallet** | How much of my envelope is left, 14 days of spend, and the **Zomato Money** estimate — set it here and watch the ladder change |
+| **Security** | What tried to manipulate my agent, by channel; what is guarding it; what the model never decides; control-plane latency per step |
+| **Taste** | Hard dietary rules (enforced as policy), soft preferences, and what it has learned |
+| **Privacy** | The data inventory from `app/privacy.py`, a one-click export, and erasure behind a second click |
+
+The settlement ladder is drawn, not decided, in the browser: `/api/state` returns
+`settlement_preview`, the same `choose_settlement()` call a run makes, evaluated against
+your typical order. A copy of the rule in JavaScript would drift from the real one.
 
 Anything the policy engine escalates appears as an **approval card** on Today: approve
 and the order is placed under the wallet lock, decline and the cart is abandoned. Without
