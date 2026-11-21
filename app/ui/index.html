@@ -30,14 +30,19 @@
     <span class="spacer"></span>
     <span class="pill budget num" id="budgetPill">—</span>
     <span class="pill" id="modePill">—</span>
+    <button class="iconbtn" id="syncBtn" type="button" title="Refresh now" aria-label="Refresh now">
+      <span class="sync-dot" id="syncDot"></span><span class="sync-label" id="syncLabel">—</span>
+    </button>
+    <button class="iconbtn" id="logoutBtn" type="button" hidden>Sign out</button>
   </header>
 
   <nav class="tabs" role="tablist">
-    <button role="tab" data-view="today"   aria-selected="true">Today</button>
-    <button role="tab" data-view="orders"  aria-selected="false">Orders</button>
-    <button role="tab" data-view="wallet"  aria-selected="false">Wallet</button>
+    <button role="tab" data-view="today"    aria-selected="true">Today</button>
+    <button role="tab" data-view="orders"   aria-selected="false">Orders</button>
+    <button role="tab" data-view="wallet"   aria-selected="false">Wallet</button>
     <button role="tab" data-view="security" aria-selected="false">Security</button>
-    <button role="tab" data-view="taste"   aria-selected="false">Taste</button>
+    <button role="tab" data-view="taste"    aria-selected="false">Taste</button>
+    <button role="tab" data-view="privacy"  aria-selected="false">Privacy</button>
   </nav>
 
   <main>
@@ -45,31 +50,52 @@
     <section class="view active" id="view-today">
       <div id="zomatoHost"></div>
       <div id="approvalsHost"></div>
-      <div id="planHost"></div>
 
-      <div class="card">
-        <div class="hero">
-          <div class="grow">
-            <div class="slot" id="nextSlot">—</div>
-            <div class="when" id="nextWhen">Reading your schedule…</div>
+      <div class="kpis" id="kpiHost" aria-label="Today at a glance"></div>
+
+      <div class="grid">
+        <div class="col">
+          <div class="card">
+            <div class="eyebrow" id="nextEyebrow">Next meal</div>
+            <div class="hero">
+              <div class="grow">
+                <div class="slot" id="nextSlot">—</div>
+                <div class="when" id="nextWhen">Reading your schedule…</div>
+              </div>
+              <button class="btn" id="orderBtn">Order now</button>
+            </div>
+            <div id="nextMeta"></div>
+            <div id="lastRunHost"></div>
           </div>
-          <button class="btn" id="orderBtn">Order now</button>
-        </div>
-        <div id="lastRunHost"></div>
-      </div>
 
-      <div class="section-title">Your day</div>
-      <div class="card">
-        <div class="timeline" id="timeline">
-          <div class="skeleton" style="margin:10px 0"></div>
-          <div class="skeleton" style="margin:10px 0;width:70%"></div>
+          <div class="section-title">Your day</div>
+          <div class="card">
+            <div id="dayStrip"></div>
+            <div class="timeline" id="timeline">
+              <div class="skeleton" style="margin:10px 0"></div>
+              <div class="skeleton" style="margin:10px 0;width:70%"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="col">
+          <div id="planHost"></div>
+          <div class="card">
+            <h2>How the next order pays</h2>
+            <p class="sub">Decided by code before the cart exists. The model never picks the rail.</p>
+            <div id="payPreviewHost"></div>
+          </div>
         </div>
       </div>
     </section>
 
     <!-- ---------------- ORDERS ---------------- -->
     <section class="view" id="view-orders">
-      <div class="section-title">Order history</div>
+      <div class="kpis" id="ordersKpis"></div>
+      <div class="toolbar">
+        <div class="section-title" style="margin:0">Order history</div>
+        <div class="filters" id="orderFilters" role="group" aria-label="Filter orders"></div>
+      </div>
       <div class="card" id="ordersHost">
         <div class="skeleton" style="margin:10px 0"></div>
       </div>
@@ -77,87 +103,155 @@
 
     <!-- ---------------- WALLET ---------------- -->
     <section class="view" id="view-wallet">
-      <div class="section-title">Spending envelope</div>
-      <div class="card">
-        <h2>Pre-authorised limits</h2>
-        <p class="sub">The agent cannot spend past these. They are enforced in code, not by the model.</p>
-        <div id="metersHost"></div>
-      </div>
+      <div class="grid">
+        <div class="col">
+          <div class="section-title">Spending envelope</div>
+          <div class="card">
+            <h2>Pre-authorised limits</h2>
+            <p class="sub">The agent cannot spend past these. They are enforced in code, not by the model.</p>
+            <div id="metersHost"></div>
+          </div>
 
-      <div class="section-title">Autonomous payment</div>
-      <div class="card">
-        <h2>Standing authorisation</h2>
-        <p class="sub">Approve once, and the agent pays without asking again — up to the ceiling you set, until you revoke it.</p>
-        <div id="mandateHost"></div>
-      </div>
+          <div class="card">
+            <h2>Daily spend</h2>
+            <p class="sub" id="spendSub">Placed orders over the last 14 days.</p>
+            <div id="spendChart"></div>
+          </div>
 
-      <div class="section-title">Activity</div>
-      <div class="card">
-        <dl class="kv" id="walletKv"></dl>
+          <div class="section-title">Activity</div>
+          <div class="card">
+            <dl class="kv" id="walletKv"></dl>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="section-title">Zomato Money</div>
+          <div class="card" id="zmCard">
+            <div id="zmHost"></div>
+          </div>
+
+          <div class="section-title">Autonomous payment</div>
+          <div class="card">
+            <h2>Standing authorisation</h2>
+            <p class="sub">Approve once, and the agent pays without asking again — up to the ceiling you set, until you revoke it.</p>
+            <div id="mandateHost"></div>
+          </div>
+        </div>
       </div>
     </section>
 
     <!-- ---------------- SECURITY ---------------- -->
     <section class="view" id="view-security">
-      <div class="section-title">Active guards</div>
-      <div class="card" id="guardsHost"></div>
+      <div class="kpis" id="securityKpis"></div>
+      <div class="grid">
+        <div class="col">
+          <div class="section-title">Blocked manipulation attempts</div>
+          <div class="card" id="threatsHost"></div>
 
-      <div class="section-title">Model availability</div>
-      <div class="card" id="llmHost"></div>
+          <div class="section-title">Control-plane latency</div>
+          <div class="card">
+            <p class="sub">Every deterministic step between your calendar and checkout, timed in process. The model call is the only slow part, and it is optional.</p>
+            <div id="latencyHost"></div>
+          </div>
+        </div>
+        <div class="col">
+          <div class="section-title">Active guards</div>
+          <div class="card" id="guardsHost"></div>
 
-      <div class="section-title">Blocked manipulation attempts</div>
-      <div class="card" id="threatsHost"></div>
+          <div class="section-title">What the model never decides</div>
+          <div class="card">
+            <p class="sub">The model picks a restaurant and dishes. Everything below is ordinary code that never reads its output — so a prompt injection that gets through still cannot buy anything outside your envelope.</p>
+            <ul class="never">
+              <li>How much may be spent</li>
+              <li>Which payment rail is used</li>
+              <li>Whether an order needs your approval</li>
+              <li>Which tools may be called</li>
+              <li>Whether an order is placed at all</li>
+            </ul>
+          </div>
+
+          <div class="section-title">Model availability</div>
+          <div class="card" id="llmHost"></div>
+        </div>
+      </div>
     </section>
 
     <!-- ---------------- TASTE ---------------- -->
     <section class="view" id="view-taste">
-      <div class="section-title">Hard constraints</div>
-      <div class="card">
-        <h2>Never order these</h2>
-        <p class="sub">Allergies and dietary rules. Enforced as policy — an order containing these is refused outright, not just discouraged.</p>
-        <div class="chips" id="dietaryChips"></div>
-        <div class="inputrow">
-          <input id="dietaryInput" placeholder="e.g. peanut, shellfish" autocomplete="off">
-          <button class="btn sm" data-add="dietary">Add</button>
+      <div class="grid">
+        <div class="col">
+          <div class="section-title">Hard constraints</div>
+          <div class="card">
+            <h2>Never order these</h2>
+            <p class="sub">Allergies and dietary rules. Enforced as policy — an order containing these is refused outright, not just discouraged.</p>
+            <div class="chips" id="dietaryChips"></div>
+            <div class="inputrow">
+              <input id="dietaryInput" placeholder="e.g. peanut, shellfish" autocomplete="off">
+              <button class="btn sm" data-add="dietary">Add</button>
+            </div>
+          </div>
+
+          <div class="section-title">Preferences</div>
+          <div class="card">
+            <h2>Likes</h2>
+            <p class="sub">Nudges the agent toward what you actually enjoy.</p>
+            <div class="chips" id="likeChips"></div>
+            <div class="inputrow">
+              <input id="likeInput" placeholder="e.g. biryani, south indian" autocomplete="off">
+              <button class="btn sm" data-add="likes">Add</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <h2>Dislikes</h2>
+            <p class="sub">Avoided where possible.</p>
+            <div class="chips" id="dislikeChips"></div>
+            <div class="inputrow">
+              <input id="dislikeInput" placeholder="e.g. mushroom" autocomplete="off">
+              <button class="btn sm" data-add="dislikes">Add</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="section-title">Delivery &amp; quality</div>
+          <div class="card">
+            <h2>Zomato account</h2>
+            <p class="sub">Orders are placed on your own account, to an address saved there.</p>
+            <div id="accountHost"></div>
+          </div>
+
+          <div class="section-title">What the agent has learned</div>
+          <div class="card">
+            <dl class="kv" id="learnedKv"></dl>
+            <div id="cuisineBars"></div>
+          </div>
         </div>
       </div>
+    </section>
 
-      <div class="section-title">Preferences</div>
+    <!-- ---------------- PRIVACY ---------------- -->
+    <section class="view" id="view-privacy">
+      <div class="section-title">Your data</div>
       <div class="card">
-        <h2>Likes</h2>
-        <p class="sub">Nudges the agent toward what you actually enjoy.</p>
-        <div class="chips" id="likeChips"></div>
-        <div class="inputrow">
-          <input id="likeInput" placeholder="e.g. biryani, south indian" autocomplete="off">
-          <button class="btn sm" data-add="likes">Add</button>
+        <h2>What this agent knows about you</h2>
+        <p class="sub">It knows where you live, what you eat, when you are free and how much you spend. India's DPDP Act gives you rights over that, and both are one click here.</p>
+        <div class="actions-row">
+          <button class="btn ghost sm" id="exportBtn" type="button">Download my data</button>
+          <button class="btn danger sm" id="eraseBtn" type="button">Erase my data</button>
         </div>
+        <p class="sub" style="margin:12px 0 0">Erasure revokes any payment authorisation first, then deletes your journals and unlinks your Zomato account. It is a hard delete, not a hidden one.</p>
       </div>
 
-      <div class="card">
-        <h2>Dislikes</h2>
-        <p class="sub">Avoided where possible.</p>
-        <div class="chips" id="dislikeChips"></div>
-        <div class="inputrow">
-          <input id="dislikeInput" placeholder="e.g. mushroom" autocomplete="off">
-          <button class="btn sm" data-add="dislikes">Add</button>
-        </div>
-      </div>
-
-      <div class="section-title">Delivery &amp; quality</div>
-      <div class="card">
-        <h2>Zomato account</h2>
-        <p class="sub">Orders are placed on your own account, to an address saved there.</p>
-        <div id="accountHost"></div>
-      </div>
-
-      <div class="section-title">What the agent has learned</div>
-      <div class="card">
-        <dl class="kv" id="learnedKv"></dl>
+      <div class="section-title">Inventory</div>
+      <div class="card" id="privacyHost">
+        <div class="skeleton" style="margin:10px 0"></div>
       </div>
     </section>
   </main>
 </div>
 
+<div class="tooltip" id="tooltip" role="status" hidden></div>
 <div class="toast" id="toast"></div>
 <script src="/static/app.js"></script>
 </body>

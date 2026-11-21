@@ -48,6 +48,7 @@ from app.integrations.zomato_auth import LoginError
 from app.integrations.zomato_mcp import ZomatoClient, ZomatoError
 from app.observability.latency import REGISTRY
 from app.observability.logger import configure_logging, get_logger, new_trace_id
+from app.payments.settlement import choose_settlement
 from app.privacy import export_user_data, forget_user, inventory
 from app.runtime import runtime_for
 from app.security.auth import (
@@ -393,6 +394,20 @@ async def dashboard_state(user: str = Depends(current_user)) -> dict[str, Any]:
     profile = rt.memory.recall()
     pool = get_pool(s)
     wallet = rt.wallet.snapshot()
+    allowed = rt.policy.policy.allowed_payment_types
+
+    # How the next order would settle, decided by the same deterministic ladder a run
+    # uses -- not re-derived in the browser, where it would drift from the real rule.
+    # Judged against what this person typically spends, or a modest example before
+    # there is any history to go on.
+    typical_paise = profile.typical_spend_paise
+    sample_paise = typical_paise if typical_paise > 0 else 25_000
+    preview = choose_settlement(
+        sample_paise,
+        balance_paise=rt.zomato_money.paise,
+        allowed=allowed,
+        prefer_cash_when_short=s.cash_fallback_when_short,
+    )
 
     return {
         "user_id": user,
@@ -405,6 +420,14 @@ async def dashboard_state(user: str = Depends(current_user)) -> dict[str, Any]:
             "planner": "gemini" if pool else "deterministic",
             "environment": s.environment,
             "min_restaurant_rating": s.min_restaurant_rating,
+            "human_approval_above_rupees": s.human_approval_above_inr,
+            "allowed_payment_types": sorted(allowed),
+            "cash_fallback_when_short": s.cash_fallback_when_short,
+        },
+        "settlement_preview": {
+            **preview.to_dict(),
+            "amount_rupees": sample_paise / 100.0,
+            "basis": "typical" if typical_paise > 0 else "example",
         },
         "wallet": {
             **wallet,

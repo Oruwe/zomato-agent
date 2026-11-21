@@ -25,15 +25,21 @@ import pytest
 
 pytest.importorskip("playwright.async_api", reason="playwright not installed")
 
+# An explicit binary if one is configured or pre-installed; otherwise Playwright's own
+# (what `playwright install chromium` puts in its cache, as CI does). Requiring the
+# pre-installed path skipped this whole module in CI while reporting green, and newer
+# Chromium builds live under chrome-linux64/ rather than chrome-linux/.
 CHROMIUM = os.environ.get("CHROMIUM_PATH") or next(
     (
         str(p)
-        for p in Path("/opt/pw-browsers").glob("chromium-*/chrome-linux/chrome")
+        for pattern in ("chromium-*/chrome-linux64/chrome", "chromium-*/chrome-linux/chrome")
+        for p in sorted(Path("/opt/pw-browsers").glob(pattern))
     ),
-    "",
+    None,
 )
-if not CHROMIUM or not Path(CHROMIUM).exists():
-    pytest.skip("chromium not available", allow_module_level=True)
+if CHROMIUM and not Path(CHROMIUM).exists():
+    pytest.skip(f"CHROMIUM_PATH does not exist: {CHROMIUM}", allow_module_level=True)
+LAUNCH = {"executable_path": CHROMIUM} if CHROMIUM else {}
 
 ROOT = Path(__file__).resolve().parent.parent
 MUTATE = {"X-Requested-With": "zomato-agent", "Content-Type": "application/json"}
@@ -102,7 +108,10 @@ async def page(server):
     from playwright.async_api import async_playwright
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(executable_path=CHROMIUM)
+        try:
+            browser = await pw.chromium.launch(**LAUNCH)
+        except Exception as exc:  # no browser downloaded for this Playwright version
+            pytest.skip(f"chromium not available: {exc}")
         pg = await browser.new_page(viewport={"width": 420, "height": 900})
         errors: list[str] = []
         pg.on("pageerror", lambda e: errors.append(f"pageerror: {e}"))
@@ -125,7 +134,7 @@ async def test_login_panel_is_hidden_when_auth_is_off(page) -> None:
 
 
 async def test_every_tab_opens(page) -> None:
-    for view in ("today", "orders", "wallet", "security", "taste"):
+    for view in ("today", "orders", "wallet", "security", "taste", "privacy"):
         await page.click(f'nav.tabs button[data-view="{view}"]')
         await page.wait_for_timeout(200)
         assert await page.locator(f"#view-{view}").is_visible(), f"{view} did not open"
@@ -224,3 +233,98 @@ async def test_wallet_shows_spend_against_the_cap(page) -> None:
     await page.wait_for_timeout(300)
     text = await page.locator("#metersHost").inner_text()
     assert "Spent today" in text and "₹" in text
+
+
+# --- dashboard views added with the settlement, privacy and audit-trail work ---------
+
+
+async def test_today_leads_with_stat_tiles(page) -> None:
+    tiles = page.locator("#kpiHost .kpi")
+    assert await tiles.count() == 4
+    text = await page.locator("#kpiHost").inner_text()
+    for label in ("Left today", "Zomato Money", "Ordered today", "Manipulation blocked"):
+        assert label in text, f"missing tile {label!r}:\n{text}"
+
+
+async def test_day_strip_draws_the_schedule_and_flags_the_hostile_invite(page) -> None:
+    assert await page.locator("#dayStrip .blk.gap").count() >= 1
+    assert await page.locator("#dayStrip .blk.risky").count() >= 1
+    # Every mark explains itself on hover, as text rather than markup.
+    risky = page.locator("#dayStrip .blk.risky").first
+    await risky.hover()
+    tip = page.locator("#tooltip")
+    assert await tip.is_visible()
+    assert "manipulation attempt" in await tip.inner_text()
+    assert await tip.locator(":scope > *:not(strong)").count() == 0
+
+
+async def test_the_next_payment_is_explained_before_it_happens(page) -> None:
+    """The settlement ladder is decided server-side; the page shows which rung wins."""
+    host = page.locator("#payPreviewHost")
+    text = await host.inner_text()
+    assert "Zomato Money" in text and "Cash on delivery" in text
+    assert await host.locator(".ladder li.chosen").count() == 1
+
+
+async def test_orders_explain_each_step_in_plain_language(page) -> None:
+    await page.click('nav.tabs button[data-view="orders"]')
+    await page.wait_for_timeout(300)
+    details = page.locator("#ordersHost details.audit").first
+    await details.locator("summary").click()
+    story = await details.inner_text()
+    assert "Read your schedule" in story
+    assert "spending envelope" in story or "policy check" in story
+    # Machine codes appear only as the small step label, never as the sentence.
+    assert "above_human_approval_threshold" not in story
+
+    # Filters narrow the list and say how many each holds.
+    await page.click('#orderFilters [data-filter="failed"]')
+    await page.wait_for_timeout(200)
+    assert await page.locator("#ordersHost .order").count() == 0
+    await page.click('#orderFilters [data-filter="all"]')
+    await page.wait_for_timeout(200)
+    assert await page.locator("#ordersHost .order").count() >= 1
+    assert page.errors == [], f"console errors on the orders view: {page.errors}"
+
+
+async def test_privacy_view_lists_what_is_held(page) -> None:
+    await page.click('nav.tabs button[data-view="privacy"]')
+    await page.wait_for_timeout(500)
+    table = await page.locator("#privacyHost").inner_text()
+    assert "Calendar contents" in table
+    assert await page.locator("#privacyHost tbody tr").count() >= 5
+    assert await page.locator("#exportBtn").is_visible()
+    assert await page.locator("#eraseBtn").is_visible()
+
+
+async def test_erasing_needs_a_second_click(page) -> None:
+    """Erasure is irreversible; a single stray click must not trigger it."""
+    await page.click('nav.tabs button[data-view="privacy"]')
+    await page.wait_for_timeout(300)
+    await page.click("#eraseBtn")
+    assert "again" in (await page.locator("#eraseBtn").inner_text()).lower()
+
+
+async def test_layout_has_no_horizontal_scroll_on_a_phone(page) -> None:
+    await page.set_viewport_size({"width": 375, "height": 800})
+    for view in ("today", "orders", "wallet", "security", "privacy"):
+        await page.click(f'nav.tabs button[data-view="{view}"]')
+        await page.wait_for_timeout(200)
+        overflow = await page.evaluate(
+            "document.documentElement.scrollWidth - document.documentElement.clientWidth")
+        assert overflow <= 0, f"{view} scrolls sideways by {overflow}px at 375px"
+
+
+async def test_zomato_money_can_be_declared_from_the_wallet(page) -> None:
+    """Runs last in this module: it changes how every later order would settle."""
+    await page.click('nav.tabs button[data-view="wallet"]')
+    await page.wait_for_timeout(300)
+    await page.fill("#zmInput", "5000")
+    await page.click("#zmSave")
+    await page.wait_for_timeout(1200)
+    card = await page.locator("#zmHost").inner_text()
+    assert "₹5,000.00" in card
+    assert "estimate" in card.lower(), "a declared balance must never read as a reading"
+    # With that much on hand the ladder lands on the hands-free rung.
+    assert "nothing to approve" in (await page.locator("#payPreviewHost").inner_text()).lower()
+    assert page.errors == [], f"console errors on the wallet view: {page.errors}"

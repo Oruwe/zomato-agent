@@ -218,6 +218,30 @@ def test_state_endpoint_is_complete(client: TestClient) -> None:
     assert body["recent_runs"], "a completed run should appear in history"
 
 
+def test_state_previews_how_the_next_order_would_settle(client: TestClient) -> None:
+    """The dashboard draws the settlement ladder; the server, not the browser, decides it."""
+    body = client.get("/api/state").json()
+    pv = body["settlement_preview"]
+    assert pv["basis"] in ("typical", "example")
+    assert pv["amount_rupees"] > 0
+    assert pv["considered"], "the ladder walk should be visible, not just its result"
+    assert sum(1 for c in pv["considered"] if c["used"]) <= 1
+    cfg = body["config"]
+    assert set(cfg["allowed_payment_types"]) <= {"upi", "cash_on_delivery"}
+    assert cfg["human_approval_above_rupees"] > 0
+
+
+def test_settlement_preview_follows_the_declared_balance(client: TestClient) -> None:
+    client.post("/api/wallet/zomato-money", json={"balance_inr": 0}, headers=MUTATE)
+    short = client.get("/api/state").json()["settlement_preview"]
+    assert not short["expect_wallet"]
+
+    client.post("/api/wallet/zomato-money", json={"balance_inr": 5000}, headers=MUTATE)
+    covered = client.get("/api/state").json()["settlement_preview"]
+    assert covered["expect_wallet"] and covered["human_less"]
+    assert covered["wire_type"] == "upi"
+
+
 def test_runs_persist_across_requests(client: TestClient) -> None:
     run_id = client.post("/api/run", json={"slot": "lunch"}, headers=MUTATE).json()["run_id"]
     assert client.get(f"/api/runs/{run_id}").json()["run_id"] == run_id
