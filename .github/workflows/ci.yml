@@ -84,8 +84,13 @@ jobs:
       - name: Build image
         run: docker build -t zomato-agent:ci .
       - name: Boot the container and check health
+        # Docker's port proxy accepts the connection before uvicorn is listening and
+        # then resets it. curl reports that as exit 56, which --retry-connrefused does
+        # not cover, so the check failed in under a second on every run. Retry on any
+        # error, and print the container's logs whichever way it goes.
         run: |
           docker run -d --name agent -p 10000:10000 zomato-agent:ci
-          curl -sf --retry 30 --retry-delay 1 --retry-connrefused http://localhost:10000/healthz
+          curl -sf --retry 30 --retry-delay 1 --retry-all-errors http://localhost:10000/healthz \
+            || { docker logs agent; exit 1; }
           docker logs agent
           docker rm -f agent
